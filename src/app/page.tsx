@@ -53,15 +53,16 @@ export default function HomePage() {
 
   const active = brands.find((brand) => brand.id === activeId) ?? null;
 
-  async function loadBrands() {
+  async function loadBrands(userId?: string) {
     if (!supabase) return;
     const { data, error } = await supabase.from("brands").select("id,name,description,logo_url").order("created_at");
     if (error) return setNotice(error.message);
     let rows = (data ?? []) as Brand[];
-    if (!rows.length && user) {
+    const ownerId = userId ?? user?.id;
+    if (!rows.length && ownerId) {
       const { data: seeded } = await supabase.from("brands").insert([
-        { user_id: user.id, name: "Noir Chronos", description: "Relojería premium" },
-        { user_id: user.id, name: "CrioRoss", description: "Alimentos frescos" }
+        { user_id: ownerId, name: "Noir Chronos", description: "Relojería premium" },
+        { user_id: ownerId, name: "CrioRoss", description: "Alimentos frescos" }
       ]).select("id,name,description,logo_url");
       rows = (seeded ?? []) as Brand[];
     }
@@ -105,7 +106,7 @@ export default function HomePage() {
       const { data } = await supabase.auth.getUser();
       if (!data.user) { setBooting(false); return; }
       setUser({ id: data.user.id, email: data.user.email, name: (data.user.user_metadata?.full_name as string | undefined) ?? (data.user.user_metadata?.name as string | undefined) });
-      await loadBrands();
+      await loadBrands(data.user.id);
       await loadHistory();
       setBooting(false);
     };
@@ -114,7 +115,7 @@ export default function HomePage() {
       const u = session?.user;
       if (!u) { setUser(null); setBrands([]); setActiveId(""); return; }
       setUser({ id: u.id, email: u.email, name: (u.user_metadata?.full_name as string | undefined) ?? (u.user_metadata?.name as string | undefined) });
-      void loadBrands();
+      void loadBrands(u.id);
       void loadHistory();
     });
     return () => listener.subscription.unsubscribe();
