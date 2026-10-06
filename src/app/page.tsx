@@ -13,6 +13,16 @@ type Generation = {
   design_type: DesignType; quantity: number; status: string; created_at: string;
 };
 
+type GeneratedItem = {
+  position: number;
+  title: string;
+  hook: string;
+  body: string;
+  cta: string;
+  visual_direction: string;
+  image_prompt: string;
+};
+
 const NAV: Array<[View, string, string]> = [
   ["home", "Inicio", "⌂"], ["library", "Biblioteca", "▦"], ["history", "Historial", "◷"],
   ["brands", "Mis marcas", "◉"], ["inspiration", "Inspiración", "✦"], ["plugins", "Plugins IA", "⌘"]
@@ -46,7 +56,7 @@ export default function HomePage() {
   const [brandDescription, setBrandDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
-  const [generated, setGenerated] = useState<string[]>([]);
+  const [generated, setGenerated] = useState<GeneratedItem[]>([]);
   const [uploadMode, setUploadMode] = useState<"resource" | "inspiration" | null>(null);
   const [booting, setBooting] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -152,21 +162,106 @@ export default function HomePage() {
 
   async function generate() {
     if (!supabase || !user || !active) return setNotice("Selecciona una marca para generar.");
-    setBusy(true); setNotice("");
-    const name = prompt.trim().slice(0, 80) || `${labelFor(designType)} · ${new Date().toLocaleDateString("es-CO")}`;
-    const { data: project, error: projectError } = await supabase.from("projects").insert({
-      brand_id: active.id, user_id: user.id, name, design_type: designType, quantity: count, prompt: prompt.trim() || null
-    }).select("id").single();
-    if (projectError || !project) { setBusy(false); return setNotice(projectError?.message ?? "No se pudo crear el proyecto."); }
-    const { error } = await supabase.from("generations").insert({
-      project_id: project.id, brand_id: active.id, user_id: user.id, prompt: prompt.trim() || null,
-      design_type: designType, quantity: count, status: "draft"
-    });
-    setBusy(false);
-    if (error) return setNotice(error.message);
-    setGenerated(Array.from({ length: count }, (_, i) => `${labelFor(designType)} ${i + 1}`));
-    await loadHistory();
-    setNotice("Generación guardada. La IA se conecta en la siguiente fase.");
+    if (!prompt.trim()) return setNotice("Escribe primero qué quieres crear.");
+
+    setBusy(true);
+    setNotice("");
+    setGenerated([]);
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brandName: active.name,
+          brandDescription: active.description,
+          prompt: prompt.trim(),
+          designType,
+          quantity: count,
+          resources: assets.map((item) => item.name),
+          inspirations: inspirations.map((item) => item.title || "Referencia")
+        })
+      });
+
+      const payload = (await response.json()) as {
+        items?: GeneratedItem[];
+        model?: string;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.items) {
+        throw new Error(payload.error || "La IA no pudo generar los conceptos.");
+      }
+
+      const name =
+        prompt.trim().slice(0, 80) ||
+        `${labelFor(designType)} · ${new Date().toLocaleDateString("es-CO")}`;
+
+      const { data: project, error: projectError } = await supabase
+        .from("projects")
+        .insert({
+          brand_id: active.id,
+          user_id: user.id,
+          name,
+          design_type: designType,
+          quantity: count,
+          prompt: prompt.trim()
+        })
+        .select("id")
+        .single();
+
+      if (projectError || !project) {
+        throw new Error(projectError?.message || "No se pudo crear el proyecto.");
+      }
+
+      const { data: generation, error: generationError } = await supabase
+        .from("generations")
+        .insert({
+          project_id: project.id,
+          brand_id: active.id,
+          user_id: user.id,
+          prompt: prompt.trim(),
+          design_type: designType,
+          quantity: count,
+          status: "completed"
+        })
+        .select("id")
+        .single();
+
+      if (generationError || !generation) {
+        throw new Error(generationError?.message || "No se pudo guardar la generación.");
+      }
+
+      const rows = payload.items.map((item) => ({
+        generation_id: generation.id,
+        brand_id: active.id,
+        user_id: user.id,
+        position: item.position,
+        title: item.title,
+        hook: item.hook,
+        body: item.body,
+        cta: item.cta,
+        visual_direction: item.visual_direction,
+        image_prompt: item.image_prompt,
+        status: "draft"
+      }));
+
+      const { error: itemError } = await supabase.from("generation_items").insert(rows);
+
+      if (itemError) {
+        throw new Error(itemError.message);
+      }
+
+      setGenerated(payload.items);
+      await loadHistory();
+      setNotice(
+        `IA conectada · ${payload.items.length} conceptos generados${payload.model ? ` · ${payload.model}` : ""}`
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo generar.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   function chooseUpload(mode: "resource" | "inspiration") {
@@ -253,7 +348,46 @@ export default function HomePage() {
             </div></div></div>
             <div className="mt-4 text-center text-[10px] text-white/30">{assets.length} recursos · {inspirations.length} inspiraciones · almacenamiento separado por marca</div>
             {notice && <div className="mx-auto mt-5 max-w-3xl rounded-2xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-xs text-white/55">{notice}</div>}
-            {generated.length > 0 && <div className="mt-10"><div className="mb-4 text-lg font-semibold">{generated.length} piezas guardadas como borrador</div><div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">{generated.map((item,i)=><div key={item} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]"><div className="aspect-[4/5] bg-gradient-to-br from-white/[0.08] via-white/[0.02] to-black p-4"><div className="flex h-full flex-col justify-between rounded-xl border border-white/[0.08] p-4"><span className="text-[10px] text-white/30">{active.name.slice(0,2).toUpperCase()}</span><div><div className="text-sm font-semibold">{item}</div><div className="mt-1 text-[10px] text-white/35">Concepto visual · {i+1}</div></div></div></div><div className="p-3 text-[10px] text-white/40">Borrador · guardado</div></div>)}</div></div>}
+            {generated.length > 0 && <div className="mt-10">
+              <div className="mb-4 flex items-end justify-between">
+                <div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/35">Resultado IA</div>
+                  <div className="mt-1 text-lg font-semibold">{generated.length} conceptos generados</div>
+                </div>
+                <span className="text-[10px] text-white/35">Textos + dirección creativa</span>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {generated.map((item) => (
+                  <div key={item.position} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]">
+                    <div className="border-b border-white/[0.07] p-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase tracking-[0.16em] text-white/30">#{item.position}</span>
+                        <span className="text-[10px] text-violet-300/60">{labelFor(designType)}</span>
+                      </div>
+                      <div className="mt-3 text-sm font-semibold">{item.title}</div>
+                    </div>
+                    <div className="space-y-3 p-4">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-white/25">Hook</div>
+                        <div className="mt-1 text-xs text-white/75">{item.hook}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-white/25">Copy</div>
+                        <div className="mt-1 text-xs leading-5 text-white/55">{item.body}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-white/25">CTA</div>
+                        <div className="mt-1 text-xs text-white/70">{item.cta}</div>
+                      </div>
+                      <div className="rounded-xl bg-white/[0.025] p-3">
+                        <div className="text-[10px] uppercase tracking-[0.14em] text-white/25">Dirección visual</div>
+                        <div className="mt-1 text-[11px] leading-5 text-white/40">{item.visual_direction}</div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>}
           </> : <div className="mx-auto text-center"><h1 className="text-3xl font-semibold">Crea tu primera marca</h1><button onClick={() => setBrandOpen(true)} className="mt-6 rounded-full bg-white px-5 py-3 text-xs font-semibold text-black">+ Nueva marca</button></div>}</div></div>}
 
           {view === "brands" && <Module title="Mis marcas" subtitle="Cada marca mantiene sus recursos e historial separados."><button onClick={() => setBrandOpen(true)} className="mb-6 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">+ Nueva marca</button><div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">{brands.map((brand)=><button key={brand.id} onClick={()=>{setActiveId(brand.id);setView("home");}} className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 text-left"><div className="text-sm font-semibold">{brand.name}</div><div className="mt-1 text-xs text-white/35">{brand.description || "Sin descripción"}</div><div className="mt-5 text-[10px] text-white/30">{brand.id===activeId ? "Marca activa" : "Seleccionar"}</div></button>)}</div></Module>}
