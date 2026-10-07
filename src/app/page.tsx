@@ -70,10 +70,14 @@ export default function HomePage() {
     let rows = (data ?? []) as Brand[];
     const ownerId = userId ?? user?.id;
     if (!rows.length && ownerId) {
-      const { data: seeded } = await supabase.from("brands").insert([
+      const { data: seeded, error: seedError } = await supabase.from("brands").insert([
         { user_id: ownerId, name: "Noir Chronos", description: "Relojería premium" },
         { user_id: ownerId, name: "CrioRoss", description: "Alimentos frescos" }
       ]).select("id,name,description,logo_url");
+      if (seedError) {
+        setNotice(`No se pudieron crear las marcas iniciales: ${seedError.message}`);
+        return;
+      }
       rows = (seeded ?? []) as Brand[];
     }
     setBrands(rows);
@@ -149,13 +153,19 @@ export default function HomePage() {
   }
 
   async function createBrand() {
-    if (!supabase || !user || !brandName.trim()) return;
+    if (!supabase) return setNotice("Creative Studio no tiene las variables de Supabase configuradas en este deployment.");
+    if (!user) return setNotice("No hay una sesión de Google activa. Cierra sesión e inicia sesión nuevamente.");
+    if (!brandName.trim()) return setNotice("Escribe el nombre de la marca.");
     setBusy(true);
     const { data, error } = await supabase.from("brands").insert({
       user_id: user.id, name: brandName.trim(), description: brandDescription.trim() || null
     }).select("id,name,description,logo_url").single();
     setBusy(false);
-    if (error) return setNotice(error.message);
+    if (error) {
+      setNotice(`No se pudo crear la marca: ${error.message}`);
+      setBusy(false);
+      return;
+    }
     setBrands((current) => [...current, data as Brand]);
     setActiveId(data.id); setBrandName(""); setBrandDescription(""); setBrandOpen(false); setView("home");
   }
@@ -335,7 +345,17 @@ export default function HomePage() {
         </aside>
 
         <section className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-16 items-center justify-between border-b border-white/[0.07] px-8"><div><div className="text-sm font-semibold">{NAV.find(([id]) => id === view)?.[1] || "Crear"}</div><div className="text-[11px] text-white/35">{active ? `Marca activa · ${active.name}` : "Sin marca activa"}</div></div><span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-1 text-[10px] text-emerald-300">Sistema online</span></header>
+          <header className="flex h-16 items-center justify-between border-b border-white/[0.07] px-8">
+            <div>
+              <div className="text-sm font-semibold">{NAV.find(([id]) => id === view)?.[1] || "Crear"}</div>
+              <div className="text-[11px] text-white/35">
+                {active ? `Marca activa · ${active.name}` : "Sin marca activa"} · {user.email || "Cuenta Google"}
+              </div>
+            </div>
+            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-1 text-[10px] text-emerald-300">
+              Supabase · {process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_URL?.replace("https://","") || "sin configuración"}
+            </span>
+          </header>
           <input ref={fileRef} type="file" multiple className="hidden" accept="image/*,.pdf,.svg,.webp,.ai,.psd,.zip" onChange={uploadFiles} />
 
           {view === "home" && <div className="subtle-grid flex flex-1 overflow-y-auto px-8 py-10"><div className="mx-auto flex w-full max-w-5xl flex-col justify-center">{active ? <>
