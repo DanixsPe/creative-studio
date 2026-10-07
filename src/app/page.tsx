@@ -35,8 +35,8 @@ const cleanName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._-]+/g,
 
 export default function HomePage() {
   const supabase = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_URL;
-    const key = process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_PUBLISHABLE_KEY;
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
     return url && key ? createSupabaseBrowserClient() : null;
   }, []);
 
@@ -353,7 +353,7 @@ export default function HomePage() {
               </div>
             </div>
             <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-1 text-[10px] text-emerald-300">
-              Supabase · {process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_URL?.replace("https://","") || "sin configuración"}
+              Supabase · {process.env.NEXT_PUBLIC_SUPABASE_URL?.replace("https://","") || "sin configuración"}
             </span>
           </header>
           <input ref={fileRef} type="file" multiple className="hidden" accept="image/*,.pdf,.svg,.webp,.ai,.psd,.zip" onChange={uploadFiles} />
