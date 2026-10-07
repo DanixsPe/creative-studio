@@ -35,8 +35,8 @@ const cleanName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._-]+/g,
 
 export default function HomePage() {
   const supabase = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    const url = process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_PUBLISHABLE_KEY;
     return url && key ? createSupabaseBrowserClient() : null;
   }, []);
 
