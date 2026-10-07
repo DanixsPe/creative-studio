@@ -10,9 +10,9 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL("/?auth=error", requestUrl.origin));
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_URL;
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseKey =
-    process.env.NEXT_PUBLIC_CREATIVE_STUDIO_SUPABASE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
     process.env.SUPABASE_ANON_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
