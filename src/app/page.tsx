@@ -21,6 +21,7 @@ type GeneratedItem = {
   cta: string;
   visual_direction: string;
   image_prompt: string;
+  image_url?: string | null;
 };
 
 const NAV: Array<[View, string, string]> = [
@@ -242,7 +243,7 @@ export default function HomePage() {
         throw new Error(generationError?.message || "No se pudo guardar la generación.");
       }
 
-      const rows = payload.items.map((item) => ({
+      const baseRows = payload.items.map((item) => ({
         generation_id: generation.id,
         brand_id: active.id,
         user_id: user.id,
@@ -256,16 +257,82 @@ export default function HomePage() {
         status: "draft"
       }));
 
-      const { error: itemError } = await supabase.from("generation_items").insert(rows);
+      const { data: savedItems, error: itemError } = await supabase
+        .from("generation_items")
+        .insert(baseRows)
+        .select("id,position,title,hook,body,cta,visual_direction,image_prompt,image_url")
+        .order("position");
 
       if (itemError) {
         throw new Error(itemError.message);
       }
 
-      setGenerated(payload.items);
+      const workingItems = (savedItems ?? []).map((row) => row as GeneratedItem);
+      setGenerated(workingItems);
+
+      let imageSuccesses = 0;
+      for (const item of workingItems) {
+        setNotice(`Generando imagen publicitaria ${item.position} de ${workingItems.length}…`);
+
+        const imageResponse = await fetch("/api/generate-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            brandId: active.id,
+            brandName: active.name,
+            brandDescription: active.description,
+            designType,
+            prompt: prompt.trim(),
+            title: item.title,
+            hook: item.hook,
+            body: item.body,
+            cta: item.cta,
+            visualDirection: item.visual_direction,
+            imagePrompt: item.image_prompt,
+            resourcePaths: assets.filter((asset) => asset.type === "image").map((asset) => asset.url),
+            inspirationPaths: inspirations.filter((item) => Boolean(item.url)).map((item) => item.url)
+          })
+        });
+
+        const imagePayload = (await imageResponse.json()) as {
+          imageUrl?: string;
+          imagePath?: string;
+          model?: string;
+          error?: string;
+        };
+
+        if (!imageResponse.ok || !imagePayload.imageUrl) {
+          setNotice(
+            `Post ${item.position}: ${imagePayload.error || "No se pudo generar la imagen."}`
+          );
+          continue;
+        }
+
+        const { error: updateError } = await supabase
+          .from("generation_items")
+          .update({ image_url: imagePayload.imagePath })
+          .eq("generation_id", generation.id)
+          .eq("position", item.position)
+          .eq("user_id", user.id);
+
+        if (updateError) {
+          setNotice(`La imagen se creó, pero no se pudo guardar: ${updateError.message}`);
+          continue;
+        }
+
+        imageSuccesses += 1;
+        setGenerated((current) =>
+          current.map((entry) =>
+            entry.position === item.position
+              ? { ...entry, image_url: imagePayload.imageUrl }
+              : entry
+          )
+        );
+      }
+
       await loadHistory();
       setNotice(
-        `IA conectada · ${payload.items.length} conceptos generados${payload.model ? ` · ${payload.model}` : ""}`
+        `IA conectada · ${workingItems.length} conceptos · ${imageSuccesses} imágenes generadas`
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "No se pudo generar.");
@@ -364,7 +431,7 @@ export default function HomePage() {
               <div className="relative"><button onClick={() => setMenu(menu === "resources" ? null : "resources")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">+ Recursos e inspiración</button>{menu === "resources" && <div className="glass absolute left-0 top-full z-20 mt-2 w-72 rounded-2xl p-2"><button onClick={() => chooseUpload("resource")} className="w-full rounded-xl p-3 text-left hover:bg-white/[0.05]"><div className="text-xs font-medium">Recursos de marca</div><div className="mt-1 text-[11px] text-white/35">Logos, productos, fotos y archivos.</div></button><button onClick={() => chooseUpload("inspiration")} className="w-full rounded-xl p-3 text-left hover:bg-white/[0.05]"><div className="text-xs font-medium">Inspiración</div><div className="mt-1 text-[11px] text-white/35">Capturas, anuncios y referencias.</div></button></div>}</div>
               <div className="relative"><button onClick={() => setMenu(menu === "type" ? null : "type")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">Tipo · {labelFor(designType)} ▾</button>{menu === "type" && <div className="glass absolute left-0 top-full z-20 mt-2 w-48 rounded-2xl p-2">{TYPES.map(([id,label]) => <button key={id} onClick={() => { setDesignType(id); setMenu(null); }} className="block w-full rounded-xl px-3 py-2.5 text-left text-xs hover:bg-white/[0.05]">{label}</button>)}</div>}</div>
               <div className="relative"><button onClick={() => setMenu(menu === "count" ? null : "count")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">Cantidad · {count} ▾</button>{menu === "count" && <div className="glass absolute left-0 top-full z-20 mt-2 w-36 rounded-2xl p-2">{COUNTS.map((n) => <button key={n} onClick={() => { setCount(n); setMenu(null); }} className="block w-full rounded-xl px-3 py-2.5 text-left text-xs hover:bg-white/[0.05]">{n} piezas</button>)}</div>}</div>
-              <button onClick={generate} disabled={busy} className="ml-auto rounded-full bg-white px-5 py-2.5 text-xs font-semibold text-black disabled:opacity-60">{busy ? "Guardando…" : "✦ Generar"}</button>
+              <button onClick={generate} disabled={busy} className="ml-auto rounded-full bg-white px-5 py-2.5 text-xs font-semibold text-black disabled:opacity-60">{busy ? "Creando…" : "✦ Generar"}</button>
             </div></div></div>
             <div className="mt-4 text-center text-[10px] text-white/30">{assets.length} recursos · {inspirations.length} inspiraciones · almacenamiento separado por marca</div>
             {notice && <div className="mx-auto mt-5 max-w-3xl rounded-2xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-xs text-white/55">{notice}</div>}
@@ -372,13 +439,18 @@ export default function HomePage() {
               <div className="mb-4 flex items-end justify-between">
                 <div>
                   <div className="text-xs uppercase tracking-[0.18em] text-white/35">Resultado IA</div>
-                  <div className="mt-1 text-lg font-semibold">{generated.length} conceptos generados</div>
+                  <div className="mt-1 text-lg font-semibold">{generated.length} piezas publicitarias</div>
                 </div>
-                <span className="text-[10px] text-white/35">Textos + dirección creativa</span>
+                <span className="text-[10px] text-white/35">Copy + imagen publicitaria</span>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {generated.map((item) => (
                   <div key={item.position} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]">
+                    {item.image_url && (
+                      <div className="aspect-[4/5] overflow-hidden bg-black/40">
+                        <img src={item.image_url} alt={`Publicidad ${item.title}`} className="h-full w-full object-cover" />
+                      </div>
+                    )}
                     <div className="border-b border-white/[0.07] p-4">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] uppercase tracking-[0.16em] text-white/30">#{item.position}</span>
