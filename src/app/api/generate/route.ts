@@ -132,7 +132,7 @@ export async function POST(request: Request) {
     );
   }
 
-  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash-lite";
+  const model = process.env.GEMINI_MODEL?.trim() || "gemini-3.5-flash-lite";
 
   const system = `Eres el director creativo y estratega de contenido de Creative Studio.
 Generas conceptos publicitarios en español para una sola marca a la vez.
@@ -191,7 +191,6 @@ Genera exactamente ${quantity} conceptos distintos pero coherentes.`;
             }
           ],
           generationConfig: {
-            temperature: 0.8,
             maxOutputTokens: Math.min(7000, Math.max(1800, quantity * 450)),
             responseMimeType: "application/json"
           }
