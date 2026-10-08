@@ -115,9 +115,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Faltan datos de generación válidos." }, { status: 400 });
   }
 
-  const model =
-    process.env.HF_MODEL?.trim() ||
-    "google/gemma-2-2b-it";
+  const configuredModel = process.env.HF_MODEL?.trim() || "";
+  const preferredModels = [
+    "Qwen/Qwen2.5-7B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct-1M",
+    "google/gemma-2-2b-it",
+    "Qwen/Qwen3-4B-Thinking-2507"
+  ];
 
   const system = `Eres el director creativo y estratega de contenido de Creative Studio.
 Generas conceptos publicitarios en español para una sola marca a la vez.
@@ -157,6 +161,52 @@ ${(body.inspirations ?? []).join(", ") || "Ninguna indicada"}
 Genera exactamente ${quantity} conceptos distintos pero coherentes.`;
 
   try {
+    let model = configuredModel;
+
+    // Hugging Face can expose different models/providers depending on account/provider settings.
+    // When no model is explicitly configured, discover the currently available models and
+    // prefer a free provider so Creative Studio does not unexpectedly spend credits.
+    if (!model) {
+      const modelsResponse = await fetch("https://router.huggingface.co/v1/models", {
+        headers: { Authorization: `Bearer ${hfToken}` },
+        cache: "no-store"
+      });
+
+      if (modelsResponse.ok) {
+        const modelsPayload = (await modelsResponse.json()) as {
+          data?: Array<{
+            id?: string;
+            providers?: Array<{
+              status?: string;
+              is_free?: boolean;
+              pricing?: { input?: number; output?: number };
+            }>;
+          }>;
+        };
+
+        const available = modelsPayload.data ?? [];
+        const ranked = preferredModels
+          .map((id) => available.find((item) => item.id === id))
+          .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+        const freeModel = ranked.find((item) =>
+          (item.providers ?? []).some((provider) => provider.status === "live" && provider.is_free === true)
+        );
+
+        if (freeModel?.id) {
+          model = `${freeModel.id}:fastest`;
+        } else if (ranked[0]?.id) {
+          // Still prefer a model that Hugging Face currently exposes to this token,
+          // but don't silently choose it when its provider list is unavailable.
+          model = `${ranked[0].id}:fastest`;
+        }
+      }
+
+      if (!model) {
+        model = "Qwen/Qwen2.5-7B-Instruct:fastest";
+      }
+    }
+
     const response = await fetch("https://router.huggingface.co/v1/chat/completions", {
       method: "POST",
       headers: {
