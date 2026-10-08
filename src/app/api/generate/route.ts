@@ -25,7 +25,12 @@ type GeneratedItem = {
 const allowedQuantities = new Set([4, 6, 9, 12, 24]);
 
 function extractJson(text: string): unknown {
-  const cleaned = text.trim().replace(/^\```json\s*/i, "").replace(/^\```\s*/i, "").replace(/\s*\```$/i, "");
+  const cleaned = text
+    .trim()
+    .replace(/^\`\`\`json\s*/i, "")
+    .replace(/^\`\`\`\s*/i, "")
+    .replace(/\s*\`\`\`$/i, "");
+
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -46,7 +51,10 @@ function extractJson(text: string): unknown {
 function normalizeItems(value: unknown, quantity: number): GeneratedItem[] {
   const source = Array.isArray(value)
     ? value
-    : typeof value === "object" && value !== null && "items" in value && Array.isArray((value as { items?: unknown }).items)
+    : typeof value === "object" &&
+        value !== null &&
+        "items" in value &&
+        Array.isArray((value as { items?: unknown }).items)
       ? (value as { items: unknown[] }).items
       : [];
 
@@ -70,15 +78,21 @@ export async function POST(request: Request) {
   const supabaseKey =
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
     process.env.SUPABASE_ANON_KEY;
-  const hfToken = process.env.HF_TOKEN;
 
   if (!supabaseUrl || !supabaseKey) {
-    return NextResponse.json({ error: "Supabase no está configurado en este deployment." }, { status: 500 });
+    return NextResponse.json(
+      { error: "Supabase no está configurado en este deployment." },
+      { status: 500 }
+    );
   }
 
-  if (!hfToken) {
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) {
     return NextResponse.json(
-      { error: "Falta HF_TOKEN en Vercel. Conecta un token de Hugging Face con permiso de Inference Providers." },
+      {
+        error:
+          "Falta GEMINI_API_KEY en Vercel. Crea una clave gratuita en Google AI Studio y añádela como Secret."
+      },
       { status: 503 }
     );
   }
@@ -112,23 +126,20 @@ export async function POST(request: Request) {
 
   const quantity = Number(body.quantity);
   if (!body.brandName || !body.prompt || !allowedQuantities.has(quantity)) {
-    return NextResponse.json({ error: "Faltan datos de generación válidos." }, { status: 400 });
+    return NextResponse.json(
+      { error: "Faltan datos de generación válidos." },
+      { status: 400 }
+    );
   }
 
-  const configuredModel = process.env.HF_MODEL?.trim() || "";
-  const preferredModels = [
-    "Qwen/Qwen2.5-7B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct-1M",
-    "google/gemma-2-2b-it",
-    "Qwen/Qwen3-4B-Thinking-2507"
-  ];
+  const model = process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash-lite";
 
   const system = `Eres el director creativo y estratega de contenido de Creative Studio.
 Generas conceptos publicitarios en español para una sola marca a la vez.
 Debes respetar la identidad de la marca y nunca mezclarla con otra.
 
-Devuelve SOLO JSON válido, sin markdown ni comentarios.
-El JSON debe ser un array con exactamente la cantidad solicitada de objetos.
+Devuelve SOLO un JSON válido.
+Debe ser un array con exactamente la cantidad solicitada de objetos.
 Cada objeto debe tener exactamente estas claves:
 position, title, hook, body, cta, visual_direction, image_prompt.
 
@@ -161,108 +172,69 @@ ${(body.inspirations ?? []).join(", ") || "Ninguna indicada"}
 Genera exactamente ${quantity} conceptos distintos pero coherentes.`;
 
   try {
-    let model = "";
-
-    // Discover what this Hugging Face token can actually use.
-    const modelsResponse = await fetch("https://router.huggingface.co/v1/models", {
-      headers: { Authorization: `Bearer ${hfToken}` },
-      cache: "no-store"
-    });
-
-    let available: Array<{
-      id?: string;
-      providers?: Array<{
-        status?: string;
-        is_free?: boolean;
-        pricing?: { input?: number; output?: number };
-      }>;
-    }> = [];
-
-    if (modelsResponse.ok) {
-      const modelsPayload = (await modelsResponse.json()) as {
-        data?: Array<{
-          id?: string;
-          providers?: Array<{
-            status?: string;
-            is_free?: boolean;
-            pricing?: { input?: number; output?: number };
-          }>;
-        }>;
-      };
-      available = modelsPayload.data ?? [];
-    }
-
-    const configuredBase = configuredModel.replace(/:.*$/, "");
-    const configured = configuredBase
-      ? available.find((item) => item.id === configuredBase)
-      : undefined;
-
-    if (
-      configured?.id &&
-      (configured.providers ?? []).some((provider) => provider.status === "live")
-    ) {
-      model = `${configured.id}:fastest`;
-    } else {
-      const ranked = preferredModels
-        .map((id) => available.find((item) => item.id === id))
-        .filter((item): item is NonNullable<typeof item> => Boolean(item));
-
-      const freeModel = ranked.find((item) =>
-        (item.providers ?? []).some(
-          (provider) => provider.status === "live" && provider.is_free === true
-        )
-      );
-
-      if (freeModel?.id) {
-        model = `${freeModel.id}:fastest`;
-      } else if (ranked[0]?.id) {
-        model = `${ranked[0].id}:fastest`;
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": geminiKey
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: system }]
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: userPrompt }]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.8,
+            maxOutputTokens: Math.min(7000, Math.max(1800, quantity * 450)),
+            responseMimeType: "application/json"
+          }
+        }),
+        cache: "no-store"
       }
-    }
-
-    if (!model) {
-      model = "Qwen/Qwen2.5-7B-Instruct:fastest";
-    }
-
-    const response = await fetch("https://router.huggingface.co/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${hfToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: userPrompt }
-        ],
-        temperature: 0.8,
-        max_tokens: Math.min(7000, Math.max(1200, quantity * 420))
-      }),
-      cache: "no-store"
-    });
+    );
 
     if (!response.ok) {
       const details = await response.text();
       return NextResponse.json(
-        { error: `Hugging Face devolvió ${response.status}: ${details.slice(0, 500)}` },
+        { error: `Gemini devolvió ${response.status}: ${details.slice(0, 700)}` },
         { status: 502 }
       );
     }
 
     const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      candidates?: Array<{
+        content?: {
+          parts?: Array<{ text?: string }>;
+        };
+      }>;
     };
 
-    const content = payload.choices?.[0]?.message?.content;
+    const content =
+      payload.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("")
+        .trim() || "";
+
     if (!content) {
-      return NextResponse.json({ error: "La IA no devolvió contenido." }, { status: 502 });
+      return NextResponse.json(
+        { error: "Gemini no devolvió contenido." },
+        { status: 502 }
+      );
     }
 
     const items = normalizeItems(extractJson(content), quantity);
     if (items.length !== quantity) {
       return NextResponse.json(
-        { error: `La IA devolvió ${items.length} piezas y se solicitaron ${quantity}.` },
+        {
+          error: `La IA devolvió ${items.length} piezas y se solicitaron ${quantity}.`
+        },
         { status: 502 }
       );
     }
