@@ -161,50 +161,67 @@ ${(body.inspirations ?? []).join(", ") || "Ninguna indicada"}
 Genera exactamente ${quantity} conceptos distintos pero coherentes.`;
 
   try {
-    let model = configuredModel;
+    let model = "";
 
-    // Hugging Face can expose different models/providers depending on account/provider settings.
-    // When no model is explicitly configured, discover the currently available models and
-    // prefer a free provider so Creative Studio does not unexpectedly spend credits.
-    if (!model) {
-      const modelsResponse = await fetch("https://router.huggingface.co/v1/models", {
-        headers: { Authorization: `Bearer ${hfToken}` },
-        cache: "no-store"
-      });
+    // Discover what this Hugging Face token can actually use.
+    const modelsResponse = await fetch("https://router.huggingface.co/v1/models", {
+      headers: { Authorization: `Bearer ${hfToken}` },
+      cache: "no-store"
+    });
 
-      if (modelsResponse.ok) {
-        const modelsPayload = (await modelsResponse.json()) as {
-          data?: Array<{
-            id?: string;
-            providers?: Array<{
-              status?: string;
-              is_free?: boolean;
-              pricing?: { input?: number; output?: number };
-            }>;
+    let available: Array<{
+      id?: string;
+      providers?: Array<{
+        status?: string;
+        is_free?: boolean;
+        pricing?: { input?: number; output?: number };
+      }>;
+    }> = [];
+
+    if (modelsResponse.ok) {
+      const modelsPayload = (await modelsResponse.json()) as {
+        data?: Array<{
+          id?: string;
+          providers?: Array<{
+            status?: string;
+            is_free?: boolean;
+            pricing?: { input?: number; output?: number };
           }>;
-        };
+        }>;
+      };
+      available = modelsPayload.data ?? [];
+    }
 
-        const available = modelsPayload.data ?? [];
-        const ranked = preferredModels
-          .map((id) => available.find((item) => item.id === id))
-          .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    const configuredBase = configuredModel.replace(/:.*$/, "");
+    const configured = configuredBase
+      ? available.find((item) => item.id === configuredBase)
+      : undefined;
 
-        const freeModel = ranked.find((item) =>
-          (item.providers ?? []).some((provider) => provider.status === "live" && provider.is_free === true)
-        );
+    if (
+      configured?.id &&
+      (configured.providers ?? []).some((provider) => provider.status === "live")
+    ) {
+      model = `${configured.id}:fastest`;
+    } else {
+      const ranked = preferredModels
+        .map((id) => available.find((item) => item.id === id))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item));
 
-        if (freeModel?.id) {
-          model = `${freeModel.id}:fastest`;
-        } else if (ranked[0]?.id) {
-          // Still prefer a model that Hugging Face currently exposes to this token,
-          // but don't silently choose it when its provider list is unavailable.
-          model = `${ranked[0].id}:fastest`;
-        }
+      const freeModel = ranked.find((item) =>
+        (item.providers ?? []).some(
+          (provider) => provider.status === "live" && provider.is_free === true
+        )
+      );
+
+      if (freeModel?.id) {
+        model = `${freeModel.id}:fastest`;
+      } else if (ranked[0]?.id) {
+        model = `${ranked[0].id}:fastest`;
       }
+    }
 
-      if (!model) {
-        model = "Qwen/Qwen2.5-7B-Instruct:fastest";
-      }
+    if (!model) {
+      model = "Qwen/Qwen2.5-7B-Instruct:fastest";
     }
 
     const response = await fetch("https://router.huggingface.co/v1/chat/completions", {
