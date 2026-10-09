@@ -20,6 +20,7 @@ type RequestBody = {
 };
 
 const MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   const cookieStore = await cookies();
@@ -209,7 +210,9 @@ ART DIRECTION REQUIREMENTS:
       );
     }
 
-    const imageBytes = Buffer.from(base64Image, "base64");
+    const imageBytes = await sharp(Buffer.from(base64Image, "base64"))
+      .jpeg({ quality: 92 })
+      .toBuffer();
     const path = `${auth.user.id}/${body.brandId}/generated/${crypto.randomUUID()}.jpg`;
 
     const upload = await supabase.storage
