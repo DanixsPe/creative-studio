@@ -1,6 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 
 type RequestBody = {
   brandId: string;
@@ -18,12 +19,7 @@ type RequestBody = {
   inspirationPaths?: string[];
 };
 
-function extractImageUrl(text: string): string | null {
-  const markdown = text.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/i);
-  if (markdown?.[1]) return markdown[1];
-  const url = text.match(/https?:\/\/[^\s)]+/i);
-  return url?.[0] ? url[0].replace(/[)\],.]+$/g, "") : null;
-}
+const MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 
 export async function POST(request: Request) {
   const cookieStore = await cookies();
@@ -31,7 +27,8 @@ export async function POST(request: Request) {
   const supabaseKey =
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
     process.env.SUPABASE_ANON_KEY;
-  const pollinationsKey = process.env.POLLINATIONS_API_KEY;
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
 
   if (!supabaseUrl || !supabaseKey) {
     return NextResponse.json(
@@ -40,11 +37,11 @@ export async function POST(request: Request) {
     );
   }
 
-  if (!pollinationsKey) {
+  if (!accountId || !apiToken) {
     return NextResponse.json(
       {
         error:
-          "Falta POLLINATIONS_API_KEY en Vercel. La generación de imágenes necesita una clave de Pollinations."
+          "Falta configurar Cloudflare Workers AI. Añade CLOUDFLARE_ACCOUNT_ID y CLOUDFLARE_API_TOKEN en Vercel."
       },
       { status: 503 }
     );
@@ -84,152 +81,141 @@ export async function POST(request: Request) {
     );
   }
 
+  // Each image only uses files belonging to the active brand and authenticated user.
   const referencePaths = [
     ...(body.resourcePaths ?? []),
     ...(body.inspirationPaths ?? [])
-  ].filter(Boolean).slice(0, 10);
+  ]
+    .filter((path) => typeof path === "string" && path.length > 0)
+    .slice(0, 8);
 
-  const referenceParts: Array<{
-    type: "text" | "image_url";
-    text?: string;
-    image_url?: { url: string };
-  }> = [];
+  const form = new FormData();
+  const promptText = `Create a finished, professional advertising poster for the brand "${body.brandName}".
+Brand description: ${body.brandDescription || "not specified"}.
+Concept: ${body.title}
+Headline / hook: ${body.hook}
+Copy: ${body.body}
+Call to action: ${body.cta}
+Art direction: ${body.visualDirection}
+Visual prompt: ${body.imagePrompt}
+Format: vertical 4:5 social media advertisement.
 
-  referenceParts.push({
-    type: "text",
-    text: `Genera una pieza publicitaria terminada para la marca "${body.brandName}".
-Descripción de marca: ${body.brandDescription || "sin descripción"}.
+ART DIRECTION REQUIREMENTS:
+- Output a finished advertisement ready to publish, not a moodboard, wireframe, or draft.
+- High-end advertising-agency composition, professional lighting, hierarchy, typography, spacing, and material detail.
+- Use supplied reference images as product/brand/style guidance. The first references are brand resources; later references are inspiration examples.
+- Preserve the physical appearance, color, product details, logo, and identity shown in the references. Do not combine different brands.
+- Include the headline and CTA legibly when appropriate. Keep text concise and correctly spelled.
+- Do not invent prices, discounts, phone numbers, URLs, features, or promotions.
+- No watermark, extra logos, fake interface elements, or generic template look.
+- Make this look like a designed advertising poster rather than an unformatted AI illustration.`;
 
-Concepto de la pieza:
-${body.title}
+  form.append("prompt", promptText.slice(0, 8000));
+  form.append("width", "1024");
+  form.append("height", "1280");
+  form.append("seed", String(Math.floor(Math.random() * 2_000_000_000)));
 
-Hook:
-${body.hook}
-
-Copy:
-${body.body}
-
-CTA:
-${body.cta}
-
-Dirección visual:
-${body.visualDirection}
-
-Prompt visual:
-${body.imagePrompt}
-
-Tipo:
-${body.designType}
-
-REQUISITOS DE DISEÑO:
-- Crea una imagen publicitaria lista para publicar, no un moodboard ni un boceto.
-- Formato vertical 4:5 para social media.
-- Composición profesional de agencia publicitaria.
-- Usa las imágenes de referencia como guía de producto, marca, estilo o composición cuando estén disponibles.
-- Mantén la identidad visual de la marca y evita mezclarla con otras marcas.
-- Cuando el recurso incluya un producto, respeta su forma, colores y detalles.
-- Integra de manera limpia el headline y CTA del concepto cuando sea adecuado para un anuncio.
-- No inventes precios, descuentos, teléfonos, URLs, características ni promociones.
-- Evita texto ilegible, deformado o excesivo.
-- El resultado debe parecer un anuncio final de alta gama, no una imagen genérica de IA.
-- No coloques marcas de agua adicionales.`
-  });
-
+  let referenceCount = 0;
   for (const path of referencePaths) {
-    const { data } = await supabase.storage
-      .from("brand-assets")
-      .createSignedUrl(path, 1800);
+    if (referenceCount >= 4) break;
 
-    if (data?.signedUrl) {
-      referenceParts.push({
-        type: "image_url",
-        image_url: { url: data.signedUrl }
-      });
+    try {
+      const { data: signed } = await supabase.storage
+        .from("brand-assets")
+        .createSignedUrl(path, 300);
+
+      if (!signed?.signedUrl) continue;
+
+      const sourceResponse = await fetch(signed.signedUrl, { cache: "no-store" });
+      if (!sourceResponse.ok) continue;
+
+      const sourceType = sourceResponse.headers.get("content-type") || "";
+      if (!sourceType.startsWith("image/")) continue;
+
+      const sourceBytes = Buffer.from(await sourceResponse.arrayBuffer());
+      if (sourceBytes.length === 0 || sourceBytes.length > 15 * 1024 * 1024) continue;
+
+      // FLUX.2 Klein accepts reference images smaller than 512x512.
+      const resized = await sharp(sourceBytes)
+        .rotate()
+        .resize(480, 480, { fit: "inside", withoutEnlargement: true })
+        .jpeg({ quality: 82 })
+        .toBuffer();
+
+      form.append(
+        `input_image_${referenceCount}`,
+        new Blob([new Uint8Array(resized)], { type: "image/jpeg" }),
+        `reference-${referenceCount + 1}.jpg`
+      );
+      referenceCount += 1;
+    } catch {
+      // Ignore a single broken reference and keep generating from the remaining ones.
     }
   }
 
-  const model =
-    process.env.POLLINATIONS_IMAGE_MODEL?.trim() ||
-    "google/gemini-3.1-flash-image";
+  const endpoint =
+    `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/${MODEL}`;
 
   try {
-    const response = await fetch("https://gen.pollinations.ai/v1/chat/completions", {
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${pollinationsKey}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${apiToken}`
       },
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: "user",
-            content: referenceParts
-          }
-        ],
-        stream: false
-      }),
+      body: form,
       cache: "no-store"
     });
 
-    if (!response.ok) {
-      const details = await response.text();
-      return NextResponse.json(
-        {
-          error: `Pollinations devolvió ${response.status}: ${details.slice(
-            0,
-            800
-          )}`
-        },
-        { status: 502 }
-      );
-    }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{
-        message?: {
-          content?: string;
-        };
-      }>;
+    const raw = await response.text();
+    let payload: {
+      success?: boolean;
+      result?: { image?: string };
+      errors?: Array<{ message?: string; code?: number }>;
+      messages?: Array<{ message?: string }>;
     };
-
-    const content = payload.choices?.[0]?.message?.content || "";
-    const externalImageUrl = extractImageUrl(content);
-
-    if (!externalImageUrl) {
+    try {
+      payload = JSON.parse(raw) as typeof payload;
+    } catch {
       return NextResponse.json(
-        {
-          error:
-            "El proveedor terminó la generación pero no devolvió una URL de imagen.",
-          providerResponse: content.slice(0, 800)
-        },
+        { error: `Cloudflare devolvió una respuesta inválida: ${raw.slice(0, 400)}` },
         { status: 502 }
       );
     }
 
-    const imageResponse = await fetch(externalImageUrl, { cache: "no-store" });
-    if (!imageResponse.ok) {
+    if (!response.ok || payload.success === false) {
+      const providerMessage =
+        payload.errors?.map((error) => error.message).filter(Boolean).join("; ") ||
+        payload.messages?.map((message) => message.message).filter(Boolean).join("; ") ||
+        raw.slice(0, 500);
+
+      const hint =
+        response.status === 401 || response.status === 403
+          ? " Revisa que el token tenga permisos Workers AI Read y Workers AI Edit."
+          : response.status === 429
+            ? " Has llegado a un límite temporal o a la asignación diaria gratuita de Workers AI."
+            : "";
+
       return NextResponse.json(
-        { error: "No se pudo descargar la imagen generada." },
+        { error: `Cloudflare Workers AI devolvió ${response.status}: ${providerMessage}.${hint}` },
+        { status: response.status === 401 ? 401 : 502 }
+      );
+    }
+
+    const base64Image = payload.result?.image;
+    if (!base64Image) {
+      return NextResponse.json(
+        { error: "Cloudflare respondió, pero no devolvió la imagen generada." },
         { status: 502 }
       );
     }
 
-    const imageBytes = await imageResponse.arrayBuffer();
-    const contentType =
-      imageResponse.headers.get("content-type") || "image/png";
-    const extension = contentType.includes("jpeg") || contentType.includes("jpg")
-      ? "jpg"
-      : contentType.includes("webp")
-        ? "webp"
-        : "png";
-
-    const path = `${auth.user.id}/${body.brandId}/generated/${crypto.randomUUID()}.${extension}`;
+    const imageBytes = Buffer.from(base64Image, "base64");
+    const path = `${auth.user.id}/${body.brandId}/generated/${crypto.randomUUID()}.jpg`;
 
     const upload = await supabase.storage
       .from("brand-assets")
       .upload(path, imageBytes, {
-        contentType,
+        contentType: "image/jpeg",
         upsert: false
       });
 
@@ -240,25 +226,29 @@ REQUISITOS DE DISEÑO:
       );
     }
 
-    const signed = await supabase.storage
+    const { data: preview, error: previewError } = await supabase.storage
       .from("brand-assets")
       .createSignedUrl(path, 3600);
 
-    if (!signed.data?.signedUrl) {
+    if (previewError || !preview?.signedUrl) {
       return NextResponse.json(
-        { error: "La imagen se guardó, pero no se pudo generar su URL de vista previa." },
+        { error: "La imagen se guardó, pero no se pudo crear la vista previa." },
         { status: 502 }
       );
     }
 
     return NextResponse.json({
-      imageUrl: signed.data.signedUrl,
+      imageUrl: preview.signedUrl,
       imagePath: path,
-      model
+      model: MODEL,
+      referencesUsed: referenceCount
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Error desconocido";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      { error: `No se pudo generar la imagen: ${message}` },
+      { status: 500 }
+    );
   }
 }
