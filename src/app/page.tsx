@@ -247,6 +247,7 @@ export default function HomePage() {
         body: JSON.stringify({
           brandName: active.name,
           brandDescription: active.description,
+          brandStyleProfile: styleProfile,
           prompt: prompt.trim(),
           designType,
           quantity: count,
