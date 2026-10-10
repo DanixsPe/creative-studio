@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 async function collectFiles(
-  admin: SupabaseClient<any, "public", "public", any, any>,
+  admin: Pick<SupabaseClient, "storage">,
   prefix: string,
   depth = 0
 ): Promise<string[]> {
