@@ -4,7 +4,9 @@ import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type DesignType = "social" | "carousel" | "branding";
-type View = "home" | "library" | "history" | "brands" | "inspiration" | "plugins";
+type View = "home" | "library" | "history" | "brands" | "inspiration" | "plugins" | "settings";
+type SettingsTab = "account" | "notifications" | "help";
+
 type Brand = { id: string; name: string; description: string | null; logo_url: string | null };
 type Asset = { id: string; name: string; type: string; url: string; created_at: string; signedUrl?: string | null };
 type Inspiration = { id: string; title: string | null; url: string; created_at: string; signedUrl?: string | null };
@@ -26,7 +28,23 @@ type GeneratedItem = {
 
 const NAV: Array<[View, string, string]> = [
   ["home", "Inicio", "⌂"], ["library", "Biblioteca", "▦"], ["history", "Historial", "◷"],
-  ["brands", "Mis marcas", "◉"], ["inspiration", "Inspiración", "✦"], ["plugins", "Plugins IA", "⌘"]
+  ["brands", "Mis marcas", "◉"], ["inspiration", "Inspiración", "✦"], ["plugins", "Plugins IA", "⌘"],
+  ["settings", "Ajustes", "⚙"]
+];
+
+const FAQS: Array<[string, string]> = [
+  ["¿Cómo creo una marca?", "Pulsa + Nueva marca, escribe el nombre y una descripción opcional. Cada marca tiene su propio espacio para recursos, inspiración, perfil visual e historial."],
+  ["¿Cómo genero publicaciones?", "Selecciona una marca, escribe lo que quieres crear, elige Social Media, Carrusel o Branding, selecciona la cantidad y pulsa Generar. Se crearán conceptos y, cuando el proveedor esté disponible, las imágenes publicitarias."],
+  ["¿Qué diferencia hay entre recursos e inspiración?", "Los recursos son archivos específicos de la marca, por ejemplo fotografías del producto o su logo. La inspiración reúne anuncios y referencias de estilo. Puedes cargar una imagen de producto por cada publicación para ayudar a conservar sus detalles."],
+  ["¿Cómo se usa el manual visual de una marca?", "Entra en Inspiración, añade imágenes de referencia y pulsa Analizar referencias y guardar estilo. Creative Studio crea una guía de estilo para orientar futuras generaciones; esto no es un reentrenamiento real de los parámetros del modelo."],
+  ["¿Puedo cambiar una imagen si sale mal?", "La IA puede equivocarse. Revisa el resultado antes de publicarlo y vuelve a generar la pieza con una indicación más concreta y una foto del producto más clara. Las herramientas de regeneración individual se seguirán mejorando."],
+  ["¿Por qué una generación puede fallar?", "Puede haber límites temporales del proveedor, falta de cuota gratuita, referencias no válidas, problemas de conexión o una respuesta técnica inesperada. Revisa el aviso que muestra la aplicación y vuelve a intentarlo más tarde."],
+  ["¿Dónde encuentro mis publicaciones anteriores?", "Abre Historial. El listado se filtra por la marca seleccionada en la barra lateral. Los archivos visuales y referencias también se guardan en la biblioteca privada de tu cuenta."],
+  ["¿Las referencias se comparten entre marcas?", "No deberían mezclarse: los recursos, las inspiraciones y el manual visual se asocian a la marca seleccionada. Comprueba la marca activa antes de generar."],
+  ["¿Cómo inicio sesión o creo una cuenta?", "Pulsa Iniciar sesión o Crear cuenta y continúa con Google. El correo y la contraseña se gestionan desde tu cuenta de Google; Creative Studio no conoce ni puede cambiar tu contraseña de Google."],
+  ["¿Puedo borrar mi cuenta?", "Sí. En Ajustes → Cuenta puedes iniciar la eliminación permanente. Se borrará el usuario y sus datos de Creative Studio, incluidos los archivos que estén guardados en su espacio privado. Esta acción no se puede deshacer."],
+  ["¿Ya se envían notificaciones por correo?", "Puedes guardar tus preferencias en Ajustes → Notificaciones. El envío automático de correos de novedades todavía requiere configurar un servicio de correo y verificar una dirección corporativa."],
+  ["¿La IA garantiza anuncios perfectos?", "No. Los modelos pueden producir defectos, texto erróneo o detalles de producto incorrectos. Debes revisar y aprobar las piezas antes de publicar, imprimir o usarlas comercialmente."]
 ];
 const TYPES: Array<[DesignType, string]> = [["social", "Social Media"], ["carousel", "Carrusel"], ["branding", "Branding"]];
 const COUNTS = [4, 6, 9, 12, 24];
@@ -80,6 +98,21 @@ export default function HomePage() {
   const [needsLegalAcceptance, setNeedsLegalAcceptance] = useState(false);
   const [legalBusy, setLegalBusy] = useState(false);
   const [legalError, setLegalError] = useState("");
+  const [showAuthDialog, setShowAuthDialog] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("account");
+  const [emailProductUpdates, setEmailProductUpdates] = useState(false);
+  const [emailTipsAndGuides, setEmailTipsAndGuides] = useState(false);
+  const [preferencesBusy, setPreferencesBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [feedbackCategory, setFeedbackCategory] = useState<"feedback" | "bug" | "suggestion" | "help">("feedback");
+  const [feedbackSubject, setFeedbackSubject] = useState("");
+  const [feedbackMessage, setFeedbackMessage] = useState("");
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [accountStats, setAccountStats] = useState({ brands: 0, generations: 0, resources: 0, inspirations: 0 });
   const fileRef = useRef<HTMLInputElement>(null);
 
   const active = brands.find((brand) => brand.id === activeId) ?? null;
@@ -214,6 +247,48 @@ export default function HomePage() {
   }, [supabase]);
 
   useEffect(() => { if (activeId) void loadBrandData(activeId); }, [activeId, supabase]);
+
+  useEffect(() => {
+    if (!supabase || !user?.id) return;
+    let alive = true;
+    void supabase.from("user_preferences")
+      .select("email_product_updates,email_tips_and_guides")
+      .eq("user_id", user.id)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!alive) return;
+        if (error) {
+          setSettingsMessage(`No se pudieron cargar las preferencias: ${error.message}`);
+          return;
+        }
+        setEmailProductUpdates(data?.email_product_updates ?? false);
+        setEmailTipsAndGuides(data?.email_tips_and_guides ?? false);
+      });
+    return () => { alive = false; };
+  }, [supabase, user?.id]);
+
+  useEffect(() => {
+    if (view !== "settings" || settingsTab !== "account" || !supabase || !user?.id) return;
+    let alive = true;
+    void Promise.all([
+      supabase.from("brands").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+      supabase.from("generations").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+      supabase.from("brand_assets").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+      supabase.from("inspirations").select("id", { count: "exact", head: true }).eq("user_id", user.id)
+    ]).then(([b, g, r, i]) => {
+      if (!alive) return;
+      setAccountStats({
+        brands: b.count ?? 0,
+        generations: g.count ?? 0,
+        resources: r.count ?? 0,
+        inspirations: i.count ?? 0
+      });
+      const failed = [b, g, r, i].find((item) => item.error);
+      if (failed?.error) setSettingsMessage(`No se pudieron cargar todos los informes: ${failed.error.message}`);
+    });
+    return () => { alive = false; };
+  }, [view, settingsTab, supabase, user?.id, brands.length]);
+
 
   async function signIn() {
     if (!supabase) return setNotice("Faltan las variables de Supabase en Vercel.");
@@ -505,6 +580,67 @@ export default function HomePage() {
     }
   }
 
+  async function savePreferences() {
+    if (!supabase || !user) return;
+    setPreferencesBusy(true);
+    setSettingsMessage("");
+    const { error } = await supabase.from("user_preferences").upsert({
+      user_id: user.id,
+      email_product_updates: emailProductUpdates,
+      email_tips_and_guides: emailTipsAndGuides,
+      updated_at: new Date().toISOString()
+    }, { onConflict: "user_id" });
+    setPreferencesBusy(false);
+    setSettingsMessage(error
+      ? `No se pudieron guardar las preferencias: ${error.message}`
+      : "Preferencias guardadas. El envío de correos se activará cuando configuremos el servicio de email.");
+  }
+
+  async function submitFeedback() {
+    if (!supabase || !user) return;
+    if (feedbackSubject.trim().length < 3 || feedbackMessage.trim().length < 10) {
+      setSettingsMessage("Escribe un asunto de al menos 3 caracteres y un mensaje de al menos 10.");
+      return;
+    }
+    setFeedbackBusy(true);
+    setSettingsMessage("");
+    const { error } = await supabase.from("user_feedback").insert({
+      user_id: user.id,
+      category: feedbackCategory,
+      subject: feedbackSubject.trim(),
+      message: feedbackMessage.trim(),
+      contact_email: user.email ?? null
+    });
+    setFeedbackBusy(false);
+    if (error) {
+      setSettingsMessage(`No se pudo guardar el mensaje: ${error.message}`);
+      return;
+    }
+    setFeedbackSubject("");
+    setFeedbackMessage("");
+    setSettingsMessage("Gracias. Tu comentario quedó guardado para revisión; la respuesta por correo se activará más adelante.");
+  }
+
+  async function deleteAccount() {
+    if (!supabase || !user || deleteConfirmation !== "ELIMINAR") return;
+    setDeletingAccount(true);
+    setSettingsMessage("");
+    try {
+      const response = await fetch("/api/account/delete", { method: "POST", cache: "no-store" });
+      const payload = await readJsonResponse<{ success?: boolean; error?: string }>(response);
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error || `No se pudo eliminar la cuenta (HTTP ${response.status}).`);
+      }
+      await supabase.auth.signOut();
+      window.location.href = "/";
+    } catch (error) {
+      setDeletingAccount(false);
+      setDeleteDialogOpen(false);
+      setDeleteConfirmation("");
+      setSettingsMessage(error instanceof Error ? error.message : "No se pudo eliminar la cuenta.");
+    }
+  }
+
   function chooseUpload(mode: "resource" | "inspiration") {
     setUploadMode(mode);
     setMenu(null);
@@ -554,19 +690,125 @@ export default function HomePage() {
   if (booting) return <main className="grid min-h-screen place-items-center bg-[#08090b] text-white"><div className="text-sm text-white/45">Cargando Creative Studio…</div></main>;
 
   if (!user) return (
-    <main className="grid min-h-screen place-items-center bg-[#08090b] p-6 text-white">
-      <div className="w-full max-w-md rounded-[28px] border border-white/[0.09] bg-[#0d0f13] p-8">
-        <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-white font-black text-black">C</div>
-        <div className="mt-6 text-center"><div className="text-xs uppercase tracking-[0.2em] text-violet-300/70">Creative Studio</div><h1 className="mt-3 text-3xl font-semibold">Tu espacio creativo para marcas</h1><p className="mt-3 text-sm leading-6 text-white/40">Guarda marcas, recursos, inspiraciones y generaciones en tu propia cuenta.</p></div>
-        <div className="mt-6 space-y-3 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4 text-xs leading-5 text-white/65">
-          <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} className="mt-1 accent-violet-400"/><span>He leído y acepto los <a href="/legal#terminos" target="_blank" className="text-violet-200 underline underline-offset-2">Términos y condiciones</a>.</span></label>
-          <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={privacyAuthorized} onChange={(event) => setPrivacyAuthorized(event.target.checked)} className="mt-1 accent-violet-400"/><span>Autorizo de forma previa, expresa e informada el tratamiento de mis datos personales conforme a la <a href="/legal#privacidad" target="_blank" className="text-violet-200 underline underline-offset-2">Política de tratamiento de datos</a>, incluida la transmisión necesaria a proveedores descritos allí para generar contenidos con IA.</span></label>
-          <a href="/legal#cookies" target="_blank" className="inline-block text-white/40 underline underline-offset-2 hover:text-white/70">Política de cookies y sesión</a>
+    <main className="relative min-h-screen overflow-hidden bg-[#08090b] text-white">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_14%_15%,rgba(124,58,237,0.16),transparent_34%),radial-gradient(ellipse_at_90%_85%,rgba(59,130,246,0.08),transparent_32%)]" />
+      <div className="pointer-events-none absolute inset-0 opacity-[0.12] [background-image:linear-gradient(rgba(255,255,255,0.09)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.09)_1px,transparent_1px)] [background-size:48px_48px]" />
+
+      <header className="relative z-10 mx-auto flex w-full max-w-[1440px] items-center justify-between px-5 py-5 sm:px-8 lg:px-12">
+        <a href="/" className="flex items-center gap-3">
+          <span className="grid h-10 w-10 place-items-center rounded-xl bg-white font-black text-black shadow-[0_8px_30px_rgba(255,255,255,0.08)]">C</span>
+          <span><span className="block text-sm font-semibold tracking-tight">Creative Studio</span><span className="block text-[10px] text-white/40">AI Brand Workspace</span></span>
+        </a>
+        <nav className="hidden items-center gap-7 text-xs text-white/50 md:flex">
+          <a href="#funciones" className="transition hover:text-white">Funciones</a>
+          <a href="#como-funciona" className="transition hover:text-white">Cómo funciona</a>
+          <a href="/legal" className="transition hover:text-white">Legal</a>
+        </nav>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setAuthMode("login"); setShowAuthDialog(true); }} className="rounded-full px-3 py-2 text-xs text-white/70 transition hover:bg-white/[0.06] hover:text-white sm:px-4">Iniciar sesión</button>
+          <button onClick={() => { setAuthMode("signup"); setShowAuthDialog(true); }} className="rounded-full bg-white px-4 py-2.5 text-xs font-semibold text-black transition hover:bg-violet-100 sm:px-5">Crear cuenta</button>
         </div>
-        <button onClick={signIn} disabled={!termsAccepted || !privacyAuthorized} className="mt-5 w-full rounded-2xl bg-white px-4 py-3.5 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40">Continuar con Google</button>
-        {notice && <div className="mt-4 rounded-xl bg-red-400/10 p-3 text-xs text-red-200">{notice}</div>}
-        <p className="mt-5 text-center text-[10px] leading-5 text-white/30">Los documentos legales están en fase de borrador y deben completarse antes del lanzamiento público.</p>
-      </div>
+      </header>
+
+      <section className="relative mx-auto grid min-h-[calc(100vh-82px)] w-full max-w-[1440px] items-center gap-12 px-5 pb-16 pt-6 sm:px-8 lg:grid-cols-[1.08fr_0.92fr] lg:gap-16 lg:px-12 lg:pb-20 lg:pt-4">
+        <div className="relative">
+          <div className="absolute -left-10 top-14 h-56 w-56 rounded-full bg-violet-500/10 blur-3xl" />
+          <div className="relative mb-5 inline-flex items-center gap-2 rounded-full border border-violet-300/20 bg-violet-300/[0.07] px-3.5 py-2 text-[10px] font-semibold uppercase tracking-[0.17em] text-violet-100/80">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.65)]" />
+            Estudio creativo asistido por IA
+          </div>
+          <h1 className="relative max-w-2xl text-4xl font-semibold leading-[1.02] tracking-[-0.055em] sm:text-5xl lg:text-6xl xl:text-7xl">De una idea a una campaña visual <span className="bg-gradient-to-r from-violet-200 via-white to-sky-200 bg-clip-text text-transparent">lista para destacar.</span></h1>
+          <p className="relative mt-5 max-w-xl text-sm leading-7 text-white/50 sm:text-base">Crea contenido publicitario para tus marcas con copy, imágenes y una identidad visual coherente. Organiza tus referencias y conserva cada generación en su propio espacio.</p>
+
+          <div className="relative mt-9 rounded-[28px] border border-white/[0.10] bg-[#0c0e12]/90 p-3 shadow-[0_30px_100px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:p-4">
+            <div className="flex items-center justify-between px-2 pb-3">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/45">Una mirada a lo que puedes crear</div>
+              <div className="rounded-full border border-emerald-300/15 bg-emerald-300/[0.05] px-2.5 py-1 text-[9px] text-emerald-200/80">Visuales de muestra</div>
+            </div>
+            <div className="grid grid-cols-[1.08fr_0.92fr] gap-3">
+              <article className="group relative min-h-[390px] overflow-hidden rounded-2xl border border-white/10 bg-black sm:min-h-[450px]">
+                <img src="https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1000&q=85" alt="Reloj de pulsera usado como ejemplo de fotografía de producto" className="absolute inset-0 h-full w-full object-cover opacity-90 transition duration-700 group-hover:scale-105" />
+                <div className="absolute inset-0 bg-gradient-to-b from-black/75 via-transparent to-black/90" />
+                <div className="absolute inset-x-0 top-0 p-4 sm:p-5"><div className="text-[9px] uppercase tracking-[0.2em] text-violet-200/80">NOIR CHRONOS · CAMPAÑA</div><div className="mt-3 max-w-[230px] text-xl font-semibold leading-tight tracking-tight sm:text-2xl">La precisión también es estilo.</div></div>
+                <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-2"><div className="text-[9px] uppercase tracking-[0.16em] text-white/55">01 / Social media</div><span className="rounded-full border border-white/25 px-3 py-1.5 text-[9px]">Diseño de campaña</span></div>
+              </article>
+              <div className="flex flex-col gap-3">
+                <article className="group relative min-h-[205px] flex-1 overflow-hidden rounded-2xl border border-white/10 bg-black">
+                  <img src="https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=750&q=85" alt="Composición de alimento fresco como referencia de anuncio" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-105" />
+                  <div className="absolute inset-0 bg-gradient-to-b from-black/65 via-transparent to-black/85" />
+                  <div className="absolute inset-x-0 top-0 p-3.5"><div className="text-[9px] uppercase tracking-[0.15em] text-emerald-200/80">CRIOROSS · PRODUCTO</div><div className="mt-2 text-base font-semibold leading-tight">Frescura que se nota.</div></div>
+                  <div className="absolute bottom-3 left-3 text-[9px] text-white/60">02 / Social media</div>
+                </article>
+                <article className="group relative min-h-[205px] flex-1 overflow-hidden rounded-2xl border border-white/10 bg-black">
+                  <img src="https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&fit=crop&w=750&q=85" alt="Fotografía editorial de moda como ejemplo de branding" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-105" />
+                  <div className="absolute inset-0 bg-gradient-to-b from-black/65 via-transparent to-black/85" />
+                  <div className="absolute inset-x-0 top-0 p-3.5"><div className="text-[9px] uppercase tracking-[0.15em] text-sky-200/80">BRANDING · EDITORIAL</div><div className="mt-2 text-base font-semibold leading-tight">Una identidad que se reconoce.</div></div>
+                  <div className="absolute bottom-3 left-3 text-[9px] text-white/60">03 / Dirección de arte</div>
+                </article>
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3.5 py-3">
+              <span className="text-[10px] text-white/45">Referencias · recursos · campañas por marca</span>
+              <span className="flex items-center gap-1.5 text-[10px] text-emerald-200/70"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300" /> Un espacio para cada marca</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="relative lg:pl-2">
+          <div className="mb-5 text-[10px] font-semibold uppercase tracking-[0.22em] text-violet-200/65">Todo tu proceso creativo, en un solo lugar</div>
+          <h2 className="max-w-lg text-3xl font-semibold leading-tight tracking-[-0.045em] sm:text-4xl">Diseña más rápido. Mantén cada marca consistente.</h2>
+          <p className="mt-4 max-w-lg text-sm leading-6 text-white/45">Creative Studio combina creación, organización y referencias visuales en una sola experiencia.</p>
+
+          <div id="funciones" className="mt-8 space-y-3">
+            {[
+              ["sparkles", "Posts publicitarios con IA", "Conceptos, hooks, copy, CTA e imágenes para redes sociales."],
+              ["layers", "Inspiración por marca", "Guarda referencias y crea un manual visual independiente para cada identidad."],
+              ["images", "Recursos de producto", "Asocia fotografías y archivos de producto a la marca correcta."],
+              ["gallery-vertical", "Biblioteca e historial", "Encuentra recursos y generaciones anteriores sin mezclar proyectos."],
+              ["palette", "Social, carrusel y branding", "Organiza conceptos para diferentes formatos creativos."]
+            ].map(([icon, title, description]) => (
+              <div key={title} className="flex items-start gap-3.5 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4 transition hover:border-violet-200/20 hover:bg-white/[0.04]">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-violet-200/10 bg-violet-200/[0.06] text-violet-100"><span className="text-base">{icon === "sparkles" ? "✦" : icon === "layers" ? "▱" : icon === "images" ? "▧" : icon === "gallery-vertical" ? "▦" : "◈"}</span></span>
+                <span><span className="block text-sm font-medium">{title}</span><span className="mt-1 block text-xs leading-5 text-white/40">{description}</span></span>
+              </div>
+            ))}
+          </div>
+
+          <div id="como-funciona" className="mt-7 rounded-2xl border border-violet-200/15 bg-gradient-to-br from-violet-200/[0.08] to-sky-200/[0.03] p-5">
+            <div className="text-sm font-semibold">De la referencia al anuncio</div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              {[[ "01", "Elige marca" ], [ "02", "Añade referencias" ], [ "03", "Genera y revisa" ]].map(([number, title]) => <div key={number} className="rounded-xl bg-black/20 p-3"><div className="text-[10px] text-violet-200/70">{number}</div><div className="mt-2 text-[11px] leading-4 text-white/65">{title}</div></div>)}
+            </div>
+          </div>
+
+          <button onClick={() => { setAuthMode("signup"); setShowAuthDialog(true); }} className="mt-7 flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-5 py-4 text-sm font-semibold text-black transition hover:bg-violet-100 sm:w-auto sm:min-w-[230px]">Crear mi espacio creativo <span aria-hidden="true">↗</span></button>
+          <p className="mt-3 text-[10px] text-white/35">Acceso con Google · Cuenta personal · Beta en desarrollo</p>
+        </div>
+      </section>
+
+      <footer className="relative mx-auto flex w-full max-w-[1440px] flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] px-5 py-5 text-[10px] text-white/35 sm:px-8 lg:px-12">
+        <span>© {new Date().getFullYear()} Creative Studio · Versión 0.1.0 Beta</span>
+        <div className="flex flex-wrap gap-4"><a href="/legal#terminos" className="hover:text-white/70">Términos y condiciones</a><a href="/legal#privacidad" className="hover:text-white/70">Privacidad</a><a href="/legal#cookies" className="hover:text-white/70">Cookies</a></div>
+      </footer>
+
+      {showAuthDialog && (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/80 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0d0f13] p-6 shadow-2xl sm:p-8">
+            <button onClick={() => { setShowAuthDialog(false); setNotice(""); }} className="float-right rounded-lg px-2 py-1 text-white/45 hover:bg-white/[0.06] hover:text-white" aria-label="Cerrar">✕</button>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-200/70">Creative Studio</div>
+            <h2 id="auth-dialog-title" className="mt-3 text-2xl font-semibold tracking-tight">{authMode === "signup" ? "Crea tu espacio creativo" : "Bienvenido de nuevo"}</h2>
+            <p className="mt-2 text-sm leading-6 text-white/50">{authMode === "signup" ? "Crea tu cuenta con Google para comenzar a organizar tus marcas." : "Inicia sesión con Google para volver a tus proyectos."}</p>
+            <div className="mt-5 space-y-4 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4 text-xs leading-5 text-white/65">
+              <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} className="mt-1 accent-violet-400"/><span>He leído y acepto los <a href="/legal#terminos" target="_blank" className="text-violet-200 underline underline-offset-2">Términos y condiciones</a>.</span></label>
+              <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={privacyAuthorized} onChange={(event) => setPrivacyAuthorized(event.target.checked)} className="mt-1 accent-violet-400"/><span>Autorizo el tratamiento de mis datos personales conforme a la <a href="/legal#privacidad" target="_blank" className="text-violet-200 underline underline-offset-2">Política de tratamiento</a>, incluido el procesamiento necesario por proveedores tecnológicos para generar contenidos.</span></label>
+            </div>
+            {notice && <div className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/[0.05] p-3 text-xs text-rose-100">{notice}</div>}
+            <button onClick={signIn} disabled={!termsAccepted || !privacyAuthorized} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-3.5 text-sm font-semibold text-black transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-40"><span className="grid h-5 w-5 place-items-center rounded-full bg-black text-[10px] font-bold text-white">G</span>{authMode === "signup" ? "Crear cuenta con Google" : "Continuar con Google"}</button>
+            <p className="mt-3 text-center text-[10px] leading-5 text-white/30">Si es tu primera vez, Google creará tu cuenta al continuar.</p>
+          </div>
+        </div>
+      )}
+      {notice && !showAuthDialog && <div className="fixed bottom-5 right-5 z-50 max-w-md rounded-xl border border-rose-300/15 bg-[#171318] px-4 py-3 text-xs text-rose-100 shadow-2xl">{notice}</div>}
     </main>
   );
 
@@ -684,6 +926,92 @@ export default function HomePage() {
           {view === "history" && <Module title="Historial" subtitle={active ? `Generaciones de ${active.name}; cambia de marca en la barra lateral para ver otro historial.` : "Selecciona una marca para ver su historial."}><div className="space-y-2">{history.filter((x) => x.brand_id === activeId).map((x)=><div key={x.id} className="flex items-center gap-4 rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-4"><div className="grid h-11 w-11 place-items-center rounded-xl bg-white/[0.06] text-xs font-semibold">{x.quantity}</div><div className="min-w-0 flex-1"><div className="truncate text-sm">{x.prompt || labelFor(x.design_type)}</div><div className="mt-1 text-[11px] text-white/35">{brands.find((b)=>b.id===x.brand_id)?.name || "Marca"} · {labelFor(x.design_type)} · {new Date(x.created_at).toLocaleString("es-CO")}</div></div><span className="text-[10px] text-white/35">{x.status}</span></div>)}</div>{!history.some((x) => x.brand_id === activeId)&&<Empty text={active ? `Aún no hay generaciones para ${active.name}.` : "Selecciona una marca."}/>}</Module>}
 
           {view === "plugins" && <Module title="Plugins IA" subtitle="Arquitectura lista para proveedores intercambiables y open-source."><div className="grid gap-3 md:grid-cols-2">{[["Texto","Copies, ideas, hooks y CTA."],["Visión","Analiza recursos e inspiraciones."],["Imagen","Generación visual desacoplada."],["Upscale / Fondo","Procesamiento final de piezas."]].map(([a,b])=><div key={a} className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5"><div className="text-sm font-semibold">{a}</div><div className="mt-2 text-xs text-white/40">{b}</div><div className="mt-4 text-[10px] text-white/30">Preparado para integración</div></div>)}</div></Module>}
+
+          {view === "settings" && <Module title="Ajustes" subtitle="Administra tu cuenta, preferencias y solicitudes de ayuda.">
+            <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
+              <nav className="h-fit rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-2">
+                {([
+                  ["account", "Cuenta", "◉"],
+                  ["notifications", "Notificaciones", "♧"],
+                  ["help", "Ayuda y comentarios", "?"]
+                ] as Array<[SettingsTab, string, string]>).map(([id, label, icon]) => <button key={id} onClick={() => { setSettingsTab(id); setSettingsMessage(""); }} className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-xs transition ${settingsTab === id ? "bg-white/[0.08] text-white" : "text-white/45 hover:bg-white/[0.04] hover:text-white"}`}><span className="w-5 text-center">{icon}</span>{label}</button>)}
+                <div className="mt-3 border-t border-white/[0.07] pt-3">
+                  <a href="/legal#terminos" className="block rounded-lg px-3 py-2 text-[11px] text-white/40 hover:text-white">Términos y condiciones ↗</a>
+                  <a href="/legal#privacidad" className="block rounded-lg px-3 py-2 text-[11px] text-white/40 hover:text-white">Privacidad y datos ↗</a>
+                </div>
+                <div className="mt-4 border-t border-white/[0.07] px-3 pt-4 text-[10px] text-white/25">Creative Studio · v0.1.0-beta</div>
+              </nav>
+
+              <div className="min-w-0 space-y-5">
+                {settingsTab === "account" && <>
+                  <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
+                    <div className="text-sm font-semibold">Tu cuenta</div>
+                    <p className="mt-1 text-xs leading-5 text-white/40">Información de acceso y resumen del uso de Creative Studio.</p>
+                    <div className="mt-5 flex items-center gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+                      <div className="grid h-12 w-12 place-items-center rounded-2xl bg-white text-sm font-bold text-black">{(user.name || user.email || "U").slice(0,1).toUpperCase()}</div>
+                      <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{user.name || "Usuario"}</div><div className="mt-1 truncate text-xs text-white/40">{user.email || "Correo no disponible"}</div><div className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-emerald-300/15 bg-emerald-300/[0.05] px-2 py-1 text-[9px] text-emerald-200/80"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300"/>Cuenta conectada con Google</div></div>
+                    </div>
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                      {[["Correo electrónico", user.email || "No disponible"], ["Inicio de sesión", "Google OAuth"], ["Contraseña", "Gestionada por Google"], ["Versión", "0.1.0 Beta"]].map(([label,value]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3.5"><div className="text-[10px] uppercase tracking-[0.14em] text-white/30">{label}</div><div className="mt-2 break-words text-xs text-white/75">{value}</div></div>)}
+                    </div>
+                    <p className="mt-4 text-[11px] leading-5 text-white/35">Creative Studio usa Google para autenticarte. Tu contraseña no se almacena ni se cambia desde esta aplicación. Para cambiarla, actualiza la seguridad de tu cuenta de Google.</p>
+                    <a href="https://myaccount.google.com/security" target="_blank" rel="noreferrer" className="mt-3 inline-flex rounded-lg border border-white/[0.09] px-3 py-2 text-[11px] text-white/65 transition hover:border-white/20 hover:text-white">Administrar seguridad de Google ↗</a>
+                  </div>
+
+                  <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
+                    <div className="text-sm font-semibold">Informe de cuenta</div>
+                    <p className="mt-1 text-xs text-white/40">Resumen de los datos asociados a tu usuario.</p>
+                    <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+                      {[[accountStats.brands,"Marcas"],[accountStats.generations,"Generaciones"],[accountStats.resources,"Recursos"],[accountStats.inspirations,"Inspiraciones"]].map(([value,label]) => <div key={label} className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><div className="text-2xl font-semibold tracking-tight">{value}</div><div className="mt-1 text-[10px] text-white/40">{label}</div></div>)}
+                    </div>
+                    <p className="mt-3 text-[10px] leading-5 text-white/30">Los contadores reflejan los registros asociados a tu usuario; la eliminación de tu cuenta también elimina tus datos de la aplicación.</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-rose-300/15 bg-rose-300/[0.025] p-5 sm:p-6">
+                    <div className="text-sm font-semibold text-rose-100">Zona de riesgo</div>
+                    <p className="mt-2 max-w-2xl text-xs leading-5 text-white/45">La eliminación de la cuenta es permanente. Se borrarán tus marcas, generaciones, preferencias, comentarios y archivos del almacenamiento de Creative Studio. No es posible deshacer esta acción.</p>
+                    <button onClick={() => { setDeleteConfirmation(""); setDeleteDialogOpen(true); }} className="mt-4 rounded-xl border border-rose-300/20 px-4 py-2.5 text-xs font-medium text-rose-100 transition hover:bg-rose-300/[0.08]">Eliminar mi cuenta</button>
+                  </div>
+                </>}
+
+                {settingsTab === "notifications" && <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
+                  <div className="text-sm font-semibold">Notificaciones por correo</div>
+                  <p className="mt-1 text-xs leading-5 text-white/40">Elige qué correos te gustaría recibir de Creative Studio. Guardaremos estas preferencias en tu cuenta.</p>
+                  <div className="mt-5 space-y-3">
+                    <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><span><span className="block text-xs font-medium">Novedades y actualizaciones</span><span className="mt-1 block text-[11px] leading-5 text-white/40">Nuevas funciones, mejoras y cambios importantes de producto.</span></span><input type="checkbox" checked={emailProductUpdates} onChange={(e)=>setEmailProductUpdates(e.target.checked)} className="mt-1 h-4 w-4 accent-violet-400"/></label>
+                    <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><span><span className="block text-xs font-medium">Consejos y guías creativas</span><span className="mt-1 block text-[11px] leading-5 text-white/40">Tutoriales, recomendaciones de diseño y formas de sacar más partido a la herramienta.</span></span><input type="checkbox" checked={emailTipsAndGuides} onChange={(e)=>setEmailTipsAndGuides(e.target.checked)} className="mt-1 h-4 w-4 accent-violet-400"/></label>
+                  </div>
+                  <button onClick={() => void savePreferences()} disabled={preferencesBusy} className="mt-5 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black disabled:opacity-50">{preferencesBusy ? "Guardando…" : "Guardar preferencias"}</button>
+                  <p className="mt-4 rounded-xl border border-amber-200/10 bg-amber-200/[0.025] p-3 text-[11px] leading-5 text-amber-100/60">Tus preferencias quedan guardadas. El envío real de correos todavía no está activo; lo conectaremos cuando configuremos el correo corporativo y el servicio de email.</p>
+                </div>}
+
+                {settingsTab === "help" && <>
+                  <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
+                    <div className="text-sm font-semibold">Centro de ayuda</div>
+                    <p className="mt-1 text-xs leading-5 text-white/40">Respuestas a las dudas habituales sobre Creative Studio.</p>
+                    <div className="mt-4 space-y-2">{FAQS.map(([question,answer], index) => <details key={question} className="group rounded-xl border border-white/[0.06] bg-white/[0.02] px-4"><summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-3 text-xs font-medium text-white/75"><span>{question}</span><span className="text-white/35 transition group-open:rotate-45">＋</span></summary><p className="pb-4 text-xs leading-5 text-white/45">{answer}</p></details>)}</div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5"><div className="text-sm font-semibold">Contáctanos</div><p className="mt-2 text-xs leading-5 text-white/40">El chat con atención al cliente estará disponible cuando se configure el canal corporativo de soporte.</p><button disabled className="mt-4 w-full cursor-not-allowed rounded-xl border border-white/[0.07] px-3 py-2.5 text-xs text-white/30">Chat de soporte · Próximamente</button></div>
+                    <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5"><div className="text-sm font-semibold">Condiciones y documentos</div><p className="mt-2 text-xs leading-5 text-white/40">Consulta los documentos de uso y privacidad de la aplicación.</p><a href="/legal" className="mt-4 inline-flex rounded-xl border border-white/[0.07] px-3 py-2.5 text-xs text-white/70 hover:text-white">Abrir centro legal ↗</a></div>
+                  </div>
+
+                  <form onSubmit={(e) => { e.preventDefault(); void submitFeedback(); }} className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
+                    <div className="text-sm font-semibold">Enviar comentarios</div>
+                    <p className="mt-1 text-xs leading-5 text-white/40">Comparte una sugerencia, reporta un error o pide ayuda. El mensaje se guarda para revisión y aún no genera una respuesta automática por correo.</p>
+                    <div className="mt-5 grid gap-3 sm:grid-cols-[220px_1fr]">
+                      <label className="text-[11px] text-white/45">Tipo de mensaje<select value={feedbackCategory} onChange={(e)=>setFeedbackCategory(e.target.value as typeof feedbackCategory)} className="mt-2 w-full rounded-xl border border-white/[0.08] bg-black/20 px-3 py-3 text-xs text-white outline-none"><option value="feedback" className="bg-[#0d0f13]">Comentario general</option><option value="bug" className="bg-[#0d0f13]">Problema técnico / bug</option><option value="suggestion" className="bg-[#0d0f13]">Sugerencia</option><option value="help" className="bg-[#0d0f13]">Necesito ayuda</option></select></label>
+                      <label className="text-[11px] text-white/45">Asunto<input required minLength={3} maxLength={140} value={feedbackSubject} onChange={(e)=>setFeedbackSubject(e.target.value)} placeholder="Ej. La exportación se queda cargando" className="mt-2 w-full rounded-xl border border-white/[0.08] bg-black/20 px-3 py-3 text-xs text-white outline-none"/></label>
+                    </div>
+                    <label className="mt-3 block text-[11px] text-white/45">Descripción<textarea required minLength={10} maxLength={5000} rows={5} value={feedbackMessage} onChange={(e)=>setFeedbackMessage(e.target.value)} placeholder="Cuéntanos qué pasó, qué esperabas y los pasos para reproducirlo…" className="mt-2 w-full resize-y rounded-xl border border-white/[0.08] bg-black/20 px-3 py-3 text-xs leading-5 text-white outline-none"/></label>
+                    <button type="submit" disabled={feedbackBusy} className="mt-4 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black disabled:opacity-50">{feedbackBusy ? "Enviando…" : "Enviar comentario"}</button>
+                  </form>
+                </>}
+                {settingsMessage && <div className={`rounded-xl border p-3 text-xs leading-5 ${/no se pudieron|no se pudo|error/i.test(settingsMessage) ? "border-rose-300/15 bg-rose-300/[0.04] text-rose-100" : "border-emerald-300/15 bg-emerald-300/[0.04] text-emerald-100/80"}`}>{settingsMessage}</div>}
+              </div>
+            </div>
+          </Module>}
         </section>
       </div>
 
@@ -700,6 +1028,19 @@ export default function HomePage() {
             {legalError && <div className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/[0.05] p-3 text-xs text-rose-100">{legalError}</div>}
             <button onClick={() => void saveLegalAcceptance()} disabled={!termsAccepted || !privacyAuthorized || legalBusy} className="mt-5 w-full rounded-xl bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-40">{legalBusy ? "Guardando aceptación…" : "Aceptar y continuar"}</button>
             <p className="mt-3 text-center text-[10px] leading-5 text-white/30">La documentación todavía es un borrador. El responsable debe completar sus datos legales antes del lanzamiento público.</p>
+          </div>
+        </div>
+      )}
+
+      {deleteDialogOpen && (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-black/80 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="delete-account-title">
+          <div className="w-full max-w-md rounded-3xl border border-rose-300/15 bg-[#0d0f13] p-6 shadow-2xl">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-200/70">Acción permanente</div>
+            <h2 id="delete-account-title" className="mt-3 text-xl font-semibold">Eliminar tu cuenta</h2>
+            <p className="mt-3 text-xs leading-5 text-white/55">Se borrarán tu cuenta de Creative Studio, las marcas, archivos, referencias, generaciones, preferencias y comentarios asociados. No se podrá recuperar.</p>
+            <p className="mt-4 text-xs text-white/65">Escribe <strong className="text-rose-100">ELIMINAR</strong> para confirmar.</p>
+            <input value={deleteConfirmation} onChange={(e)=>setDeleteConfirmation(e.target.value)} autoComplete="off" className="mt-2 w-full rounded-xl border border-rose-300/15 bg-black/25 px-3 py-3 text-sm outline-none focus:border-rose-300/40" placeholder="ELIMINAR" />
+            <div className="mt-5 flex justify-end gap-2"><button disabled={deletingAccount} onClick={()=>{setDeleteDialogOpen(false);setDeleteConfirmation("");}} className="rounded-xl border border-white/[0.08] px-4 py-2.5 text-xs text-white/55">Cancelar</button><button disabled={deleteConfirmation !== "ELIMINAR" || deletingAccount} onClick={()=>void deleteAccount()} className="rounded-xl bg-rose-300 px-4 py-2.5 text-xs font-semibold text-black disabled:cursor-not-allowed disabled:opacity-35">{deletingAccount ? "Eliminando…" : "Eliminar definitivamente"}</button></div>
           </div>
         </div>
       )}
