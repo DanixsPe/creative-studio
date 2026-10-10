@@ -1,5 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 async function collectFiles(
-  admin: ReturnType<typeof createClient>,
+  admin: SupabaseClient<any, "public", "public", any, any>,
   prefix: string,
   depth = 0
 ): Promise<string[]> {
