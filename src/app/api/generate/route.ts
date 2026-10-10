@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 type RequestBody = {
   brandName: string;
   brandDescription?: string | null;
+  brandStyleProfile?: string | null;
   prompt: string;
   designType: "social" | "carousel" | "branding";
   quantity: number;
@@ -156,6 +157,8 @@ Reglas:
 
   const userPrompt = `Marca: ${body.brandName}
 Descripción: ${body.brandDescription || "Sin descripción"}
+Manual visual guardado para esta marca:
+${body.brandStyleProfile || "No hay manual visual guardado; respeta los nombres de los recursos e inspiraciones indicados."}
 
 Tipo: ${body.designType}
 Cantidad: ${quantity}
