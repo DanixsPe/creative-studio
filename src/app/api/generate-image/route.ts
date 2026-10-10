@@ -23,6 +23,72 @@ const MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function wrapText(value: string, maxChars: number, maxLines: number): string[] {
+  const words = value.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+      if (lines.length >= maxLines) break;
+    } else {
+      line = next;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  if (words.length && lines.length === maxLines && lines.join(" ").length < words.join(" ").length) {
+    lines[lines.length - 1] = lines[lines.length - 1].replace(/[.,;:]?$/, "…");
+  }
+  return lines;
+}
+
+function posterOverlay(brandName: string, title: string, hook: string, body: string, cta: string): Buffer {
+  const brand = escapeXml(brandName.toLocaleUpperCase().slice(0, 36));
+  const titleLines = wrapText(title || brandName, 32, 1);
+  const hookLines = wrapText(hook || title, 32, 3);
+  const bodyLines = wrapText(body, 57, 2);
+  const ctaLines = wrapText(cta || "Descubre más", 36, 1);
+  const titleText = titleLines.map((line, index) => `<tspan x="64" dy="${index === 0 ? 0 : 38}">${escapeXml(line)}</tspan>`).join("");
+  const hookText = hookLines.map((line, index) => `<tspan x="64" dy="${index === 0 ? 0 : 52}">${escapeXml(line)}</tspan>`).join("");
+  const bodyText = bodyLines.map((line, index) => `<tspan x="64" dy="${index === 0 ? 0 : 30}">${escapeXml(line)}</tspan>`).join("");
+  const ctaText = ctaLines.map((line, index) => `<tspan x="512" dy="${index === 0 ? 0 : 26}">${escapeXml(line)}</tspan>`).join("");
+
+  const svg = `<svg width="1024" height="1280" viewBox="0 0 1024 1280" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="topShade" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#050608" stop-opacity="0.92"/>
+        <stop offset="72%" stop-color="#050608" stop-opacity="0.60"/>
+        <stop offset="100%" stop-color="#050608" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="bottomShade" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#050608" stop-opacity="0"/>
+        <stop offset="24%" stop-color="#050608" stop-opacity="0.70"/>
+        <stop offset="100%" stop-color="#050608" stop-opacity="0.96"/>
+      </linearGradient>
+    </defs>
+    <rect width="1024" height="490" fill="url(#topShade)"/>
+    <rect y="835" width="1024" height="445" fill="url(#bottomShade)"/>
+    <text x="64" y="83" fill="#d8c7ff" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" letter-spacing="4">${brand}</text>
+    <text x="64" y="132" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="25" font-weight="600">${titleText}</text>
+    <text x="64" y="199" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="43" font-weight="700">${hookText}</text>
+    <text x="64" y="1050" fill="#ffffff" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="400">${bodyText}</text>
+    <rect x="64" y="1120" width="896" height="88" rx="18" fill="#e5d9ff"/>
+    <text x="512" y="1172" fill="#101015" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="25" font-weight="700">${ctaText}</text>
+  </svg>`;
+  return Buffer.from(svg);
+}
+
 export async function POST(request: Request) {
   const cookieStore = await cookies();
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -84,6 +150,14 @@ export async function POST(request: Request) {
   }
 
   // Each image only uses files belonging to the active brand and authenticated user.
+  const { data: styleRow } = await supabase
+    .from("brand_style_profiles")
+    .select("style_profile")
+    .eq("brand_id", body.brandId)
+    .eq("user_id", auth.user.id)
+    .maybeSingle();
+  const savedStyleProfile = styleRow?.style_profile || "No hay un manual visual guardado; sigue fielmente las imágenes de inspiración adjuntas.";
+
   // Keep brand inspirations first (style), then attach at most one product image
   // for this individual post. FLUX.2 Klein supports up to four reference images.
   const inspirationPaths = (body.inspirationPaths ?? [])
@@ -95,29 +169,30 @@ export async function POST(request: Request) {
   const referencePaths = [...inspirationPaths, ...resourcePaths];
 
   const form = new FormData();
-  const promptText = `Create a finished, professional advertising poster for the brand "${body.brandName}".
+  const promptText = `Create ONLY the photographic/artwork background for a finished social-media advertisement for "${body.brandName}". Do NOT draw any text, letters, numbers, logos, watermarks, UI elements, or fake typography. Correct typography will be added afterwards by the app, so leave deliberate clean negative space at the top and bottom.
 Brand description: ${body.brandDescription || "not specified"}.
 Concept: ${body.title}
-Headline / hook: ${body.hook}
-Copy: ${body.body}
-Call to action: ${body.cta}
+Planned headline: ${body.hook}
+Planned copy: ${body.body}
+Planned CTA: ${body.cta}
 Art direction: ${body.visualDirection}
 Visual prompt: ${body.imagePrompt}
-Format: vertical 4:5 social media advertisement.
+Saved brand-specific visual style profile:
+${savedStyleProfile}
+Format: vertical 4:5 social media advertising artwork, 1024x1280.
 
 REFERENCE ORDER:
-- Reference images are supplied with brand inspirations first, then the product image for this specific post (if available).
-- Use the inspiration images to reproduce the brand's preferred art direction, palette, composition, lighting, texture, and visual language. Do not copy their exact layout blindly.
-- If a product/reference photo is supplied last, use that specific product as the main subject and preserve its shape, proportions, color, dial/details, logo placement, materials, and silhouette. Do not invent a different product.
+- Reference images are supplied with this brand's inspiration images first, then the product photo assigned to this specific post (if available).
+- Use inspiration images to keep palette, lighting, textures, framing, and art direction consistent with the saved visual style profile, without copying an exact ad layout.
+- If the last reference is a product photo, use that exact product as the main subject. Preserve its visible shape, proportions, color, dial/details, materials, and silhouette. Do not replace it with another product.
 
-ART DIRECTION REQUIREMENTS:
-- Output a finished advertisement ready to publish, not a moodboard, wireframe, or draft.
-- High-end advertising-agency composition, professional lighting, clear hierarchy, balanced spacing, convincing materials, and coherent typography.
-- Keep the product fully visible and anatomically/physically plausible; avoid cropped-off watches, duplicated parts, melted details, blur, broken hands, distorted crowns or straps.
-- Include the headline and CTA as short, correctly spelled typography when appropriate. Prefer limited text to reduce letter errors; never invent extra claims.
-- Do not invent prices, discounts, phone numbers, URLs, features, or promotions.
-- No watermark, extra logos, fake interface elements, or generic template look.
-- Make this look like a designed advertising poster rather than an unformatted AI illustration.`;
+ARTWORK REQUIREMENTS:
+- Premium advertising-agency photography and materials, deliberate composition and controlled light.
+- Keep the product fully visible, sharp, plausible and undistorted; avoid cropped watches, extra hands, duplicated parts, melted details, blurred dial, distorted crown or straps.
+- Keep the top 30% and bottom 28% visually quiet/dark enough for later typography overlays.
+- Never add typography; never invent prices, discounts, phone numbers, URLs, features, or promotions.
+- No watermark, extra logos, malformed objects, or generic template look.
+- Generate an art-directed background image, not the final typography layer.`;
 
   form.append("prompt", promptText.slice(0, 8000));
   form.append("width", "1024");
@@ -218,9 +293,14 @@ ART DIRECTION REQUIREMENTS:
       );
     }
 
-    const imageBytes = await sharp(Buffer.from(base64Image, "base64"))
-      .jpeg({ quality: 92 })
+    const rawImageBytes = Buffer.from(base64Image, "base64");
+    const overlay = posterOverlay(body.brandName, body.title, body.hook, body.body, body.cta);
+    const imageBytes = await sharp(rawImageBytes)
+      .resize(1024, 1280, { fit: "cover" })
+      .composite([{ input: overlay, top: 0, left: 0 }])
+      .jpeg({ quality: 92, mozjpeg: true })
       .toBuffer();
+
     const path = `${auth.user.id}/${body.brandId}/generated/${crypto.randomUUID()}.jpg`;
 
     const upload = await supabase.storage
