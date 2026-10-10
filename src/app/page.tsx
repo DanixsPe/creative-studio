@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
@@ -695,10 +696,10 @@ export default function HomePage() {
       <div className="pointer-events-none absolute inset-0 opacity-[0.12] [background-image:linear-gradient(rgba(255,255,255,0.09)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.09)_1px,transparent_1px)] [background-size:48px_48px]" />
 
       <header className="relative z-10 mx-auto flex w-full max-w-[1440px] items-center justify-between px-5 py-5 sm:px-8 lg:px-12">
-        <a href="/" className="flex items-center gap-3">
+        <Link href="/" className="flex items-center gap-3">
           <span className="grid h-10 w-10 place-items-center rounded-xl bg-white font-black text-black shadow-[0_8px_30px_rgba(255,255,255,0.08)]">C</span>
           <span><span className="block text-sm font-semibold tracking-tight">Creative Studio</span><span className="block text-[10px] text-white/40">AI Brand Workspace</span></span>
-        </a>
+        </Link>
         <nav className="hidden items-center gap-7 text-xs text-white/50 md:flex">
           <a href="#funciones" className="transition hover:text-white">Funciones</a>
           <a href="#como-funciona" className="transition hover:text-white">Cómo funciona</a>
@@ -989,7 +990,7 @@ export default function HomePage() {
                   <div className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5 sm:p-6">
                     <div className="text-sm font-semibold">Centro de ayuda</div>
                     <p className="mt-1 text-xs leading-5 text-white/40">Respuestas a las dudas habituales sobre Creative Studio.</p>
-                    <div className="mt-4 space-y-2">{FAQS.map(([question,answer], index) => <details key={question} className="group rounded-xl border border-white/[0.06] bg-white/[0.02] px-4"><summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-3 text-xs font-medium text-white/75"><span>{question}</span><span className="text-white/35 transition group-open:rotate-45">＋</span></summary><p className="pb-4 text-xs leading-5 text-white/45">{answer}</p></details>)}</div>
+                    <div className="mt-4 space-y-2">{FAQS.map(([question,answer]) => <details key={question} className="group rounded-xl border border-white/[0.06] bg-white/[0.02] px-4"><summary className="flex cursor-pointer list-none items-center justify-between gap-4 py-3 text-xs font-medium text-white/75"><span>{question}</span><span className="text-white/35 transition group-open:rotate-45">＋</span></summary><p className="pb-4 text-xs leading-5 text-white/45">{answer}</p></details>)}</div>
                   </div>
 
                   <div className="grid gap-3 md:grid-cols-2">
