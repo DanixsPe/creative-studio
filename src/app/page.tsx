@@ -34,6 +34,18 @@ const COUNTS = [4, 6, 9, 12, 24];
 const labelFor = (type: DesignType) => TYPES.find(([id]) => id === type)?.[1] ?? "Social Media";
 const cleanName = (name: string) => name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/-+/g, "-");
 
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const raw = await response.text();
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const preview = raw.replace(/\\s+/g, " ").trim().slice(0, 180);
+    throw new Error(
+      `El servidor respondió con HTTP ${response.status}, pero no devolvió JSON válido.${preview ? ` Respuesta: ${preview}` : ""}`
+    );
+  }
+}
+
 export default function HomePage() {
   const supabase = useMemo(() => {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -71,12 +83,21 @@ export default function HomePage() {
     let rows = (data ?? []) as Brand[];
     const ownerId = userId ?? user?.id;
     if (!rows.length && ownerId) {
-      const { data: seeded, error: seedError } = await supabase.from("brands").insert([
+      // Idempotent seeding prevents duplicate default brands when auth events race.
+      const { error: seedError } = await supabase.from("brands").upsert([
         { user_id: ownerId, name: "Noir Chronos", description: "Relojería premium" },
         { user_id: ownerId, name: "CrioRoss", description: "Alimentos frescos" }
-      ]).select("id,name,description,logo_url");
+      ], { onConflict: "user_id,name", ignoreDuplicates: true });
       if (seedError) {
         setNotice(`No se pudieron crear las marcas iniciales: ${seedError.message}`);
+        return;
+      }
+      const { data: seeded, error: refreshError } = await supabase
+        .from("brands")
+        .select("id,name,description,logo_url")
+        .order("created_at");
+      if (refreshError) {
+        setNotice(`No se pudieron cargar las marcas: ${refreshError.message}`);
         return;
       }
       rows = (seeded ?? []) as Brand[];
@@ -126,7 +147,9 @@ export default function HomePage() {
       setBooting(false);
     };
     void bootstrap();
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      // bootstrap() already handles the initial restored session.
+      if (event === "INITIAL_SESSION") return;
       const u = session?.user;
       if (!u) { setUser(null); setBrands([]); setActiveId(""); return; }
       setUser({ id: u.id, email: u.email, name: (u.user_metadata?.full_name as string | undefined) ?? (u.user_metadata?.name as string | undefined) });
@@ -157,6 +180,9 @@ export default function HomePage() {
     if (!supabase) return setNotice("Creative Studio no tiene las variables de Supabase configuradas en este deployment.");
     if (!user) return setNotice("No hay una sesión de Google activa. Cierra sesión e inicia sesión nuevamente.");
     if (!brandName.trim()) return setNotice("Escribe el nombre de la marca.");
+    if (brands.some((brand) => brand.name.trim().toLocaleLowerCase() === brandName.trim().toLocaleLowerCase())) {
+      return setNotice("Ya existe una marca con ese nombre. Elige otro nombre o selecciona la existente.");
+    }
     setBusy(true);
     const { data, error } = await supabase.from("brands").insert({
       user_id: user.id, name: brandName.trim(), description: brandDescription.trim() || null
@@ -194,11 +220,11 @@ export default function HomePage() {
         })
       });
 
-      const payload = (await response.json()) as {
+      const payload = await readJsonResponse<{
         items?: GeneratedItem[];
         model?: string;
         error?: string;
-      };
+      }>(response);
 
       if (!response.ok || !payload.items) {
         throw new Error(payload.error || "La IA no pudo generar los conceptos.");
@@ -270,41 +296,62 @@ export default function HomePage() {
       const workingItems = (savedItems ?? []).map((row) => row as GeneratedItem);
       setGenerated(workingItems);
 
+      const productResources = assets.filter((asset) => asset.type === "image");
+      const styleReferences = inspirations.filter((reference) => Boolean(reference.url)).slice(0, 3);
       let imageSuccesses = 0;
+      const imageErrors: string[] = [];
+
       for (const item of workingItems) {
         setNotice(`Generando imagen publicitaria ${item.position} de ${workingItems.length}…`);
 
-        const imageResponse = await fetch("/api/generate-image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            brandId: active.id,
-            brandName: active.name,
-            brandDescription: active.description,
-            designType,
-            prompt: prompt.trim(),
-            title: item.title,
-            hook: item.hook,
-            body: item.body,
-            cta: item.cta,
-            visualDirection: item.visual_direction,
-            imagePrompt: item.image_prompt,
-            resourcePaths: assets.filter((asset) => asset.type === "image").map((asset) => asset.url),
-            inspirationPaths: inspirations.filter((item) => Boolean(item.url)).map((item) => item.url)
-          })
-        });
+        // Pair one product/resource image with each post by position. If fewer
+        // resources than posts were uploaded, the remaining posts use the brand's style references.
+        const assignedProduct = productResources[item.position - 1];
+        let imageResponse: Response;
+        try {
+          imageResponse = await fetch("/api/generate-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              brandId: active.id,
+              brandName: active.name,
+              brandDescription: active.description,
+              designType,
+              prompt: prompt.trim(),
+              title: item.title,
+              hook: item.hook,
+              body: item.body,
+              cta: item.cta,
+              visualDirection: item.visual_direction,
+              imagePrompt: item.image_prompt,
+              resourcePaths: assignedProduct ? [assignedProduct.url] : [],
+              inspirationPaths: styleReferences.map((reference) => reference.url)
+            })
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Error de red";
+          imageErrors.push(`Post ${item.position}: ${message}`);
+          continue;
+        }
 
-        const imagePayload = (await imageResponse.json()) as {
+        let imagePayload: {
           imageUrl?: string;
           imagePath?: string;
           model?: string;
+          referencesUsed?: number;
           error?: string;
         };
+        try {
+          imagePayload = await readJsonResponse<typeof imagePayload>(imageResponse);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Respuesta no válida";
+          imageErrors.push(`Post ${item.position}: ${message}`);
+          continue;
+        }
 
         if (!imageResponse.ok || !imagePayload.imageUrl) {
-          setNotice(
-            `Post ${item.position}: ${imagePayload.error || "No se pudo generar la imagen."}`
-          );
+          const message = imagePayload.error || `No se pudo generar la imagen (HTTP ${imageResponse.status}).`;
+          imageErrors.push(`Post ${item.position}: ${message}`);
           continue;
         }
 
@@ -316,7 +363,7 @@ export default function HomePage() {
           .eq("user_id", user.id);
 
         if (updateError) {
-          setNotice(`La imagen se creó, pero no se pudo guardar: ${updateError.message}`);
+          imageErrors.push(`Post ${item.position}: imagen creada, pero no guardada: ${updateError.message}`);
           continue;
         }
 
@@ -331,8 +378,14 @@ export default function HomePage() {
       }
 
       await loadHistory();
+      const productSummary = productResources.length
+        ? ` · ${Math.min(productResources.length, workingItems.length)}/${workingItems.length} posts con recurso de producto asignado`
+        : " · sin fotos de producto; se usarán las referencias de estilo";
+      const errorSummary = imageErrors.length
+        ? ` · errores: ${imageErrors.slice(0, 2).join(" | ")}`
+        : "";
       setNotice(
-        `IA conectada · ${workingItems.length} conceptos · ${imageSuccesses} imágenes generadas`
+        `IA conectada · ${workingItems.length} conceptos · ${imageSuccesses} imágenes generadas${productSummary}${errorSummary}`
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "No se pudo generar.");
@@ -420,7 +473,8 @@ export default function HomePage() {
               </div>
             </div>
             <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-1 text-[10px] text-emerald-300">
-              Supabase · {process.env.NEXT_PUBLIC_SUPABASE_URL?.replace("https://","") || "sin configuración"}
+              <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-emerald-300" />
+              Usuario en línea
             </span>
           </header>
           <input ref={fileRef} type="file" multiple className="hidden" accept="image/*,.pdf,.svg,.webp,.ai,.psd,.zip" onChange={uploadFiles} />
@@ -433,7 +487,10 @@ export default function HomePage() {
               <div className="relative"><button onClick={() => setMenu(menu === "count" ? null : "count")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">Cantidad · {count} ▾</button>{menu === "count" && <div className="glass absolute left-0 top-full z-20 mt-2 w-36 rounded-2xl p-2">{COUNTS.map((n) => <button key={n} onClick={() => { setCount(n); setMenu(null); }} className="block w-full rounded-xl px-3 py-2.5 text-left text-xs hover:bg-white/[0.05]">{n} piezas</button>)}</div>}</div>
               <button onClick={generate} disabled={busy} className="ml-auto rounded-full bg-white px-5 py-2.5 text-xs font-semibold text-black disabled:opacity-60">{busy ? "Creando…" : "✦ Generar"}</button>
             </div></div></div>
-            <div className="mt-4 text-center text-[10px] text-white/30">{assets.length} recursos · {inspirations.length} inspiraciones · almacenamiento separado por marca</div>
+            <div className={`mt-4 text-center text-[10px] ${assets.filter((item) => item.type === "image").length < count ? "text-amber-200/60" : "text-white/30"}`}>
+              {assets.filter((item) => item.type === "image").length}/{count} imágenes de producto para los posts · {inspirations.length} inspiraciones de {active.name}
+              {assets.filter((item) => item.type === "image").length < count ? " · Puedes subir una imagen por cada post desde + Recursos e inspiración." : " · Se asignará una imagen de producto distinta a cada post."}
+            </div>
             {notice && <div className="mx-auto mt-5 max-w-3xl rounded-2xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-xs text-white/55">{notice}</div>}
             {generated.length > 0 && <div className="mt-10">
               <div className="mb-4 flex items-end justify-between">
@@ -488,7 +545,7 @@ export default function HomePage() {
 
           {view === "inspiration" && <Module title="Inspiración" subtitle="Referencias visuales separadas por marca.">{active && <button onClick={()=>chooseUpload("inspiration")} className="mb-6 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">Añadir inspiración</button>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">{inspirations.map((x)=><div key={x.id} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]"><div className="aspect-square bg-black/30">{x.signedUrl ? <img src={x.signedUrl} alt={x.title||"Inspiración"} className="h-full w-full object-cover"/> : <div className="grid h-full place-items-center text-xs text-white/30">Sin vista previa</div>}</div><div className="p-3"><div className="truncate text-xs">{x.title||"Referencia"}</div><button onClick={()=>void removeInspiration(x)} className="mt-2 text-[10px] text-red-300/70">Eliminar</button></div></div>)}</div>{!inspirations.length&&<Empty text="Todavía no hay referencias."/>}</Module>}
 
-          {view === "history" && <Module title="Historial" subtitle="Tus generaciones guardadas."><div className="space-y-2">{history.map((x)=><div key={x.id} className="flex items-center gap-4 rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-4"><div className="grid h-11 w-11 place-items-center rounded-xl bg-white/[0.06] text-xs font-semibold">{x.quantity}</div><div className="min-w-0 flex-1"><div className="truncate text-sm">{x.prompt || labelFor(x.design_type)}</div><div className="mt-1 text-[11px] text-white/35">{brands.find((b)=>b.id===x.brand_id)?.name || "Marca"} · {labelFor(x.design_type)} · {new Date(x.created_at).toLocaleString("es-CO")}</div></div><span className="text-[10px] text-white/35">{x.status}</span></div>)}</div>{!history.length&&<Empty text="Aún no tienes generaciones."/>}</Module>}
+          {view === "history" && <Module title="Historial" subtitle={active ? `Generaciones de ${active.name}; cambia de marca en la barra lateral para ver otro historial.` : "Selecciona una marca para ver su historial."}><div className="space-y-2">{history.filter((x) => x.brand_id === activeId).map((x)=><div key={x.id} className="flex items-center gap-4 rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-4"><div className="grid h-11 w-11 place-items-center rounded-xl bg-white/[0.06] text-xs font-semibold">{x.quantity}</div><div className="min-w-0 flex-1"><div className="truncate text-sm">{x.prompt || labelFor(x.design_type)}</div><div className="mt-1 text-[11px] text-white/35">{brands.find((b)=>b.id===x.brand_id)?.name || "Marca"} · {labelFor(x.design_type)} · {new Date(x.created_at).toLocaleString("es-CO")}</div></div><span className="text-[10px] text-white/35">{x.status}</span></div>)}</div>{!history.some((x) => x.brand_id === activeId)&&<Empty text={active ? `Aún no hay generaciones para ${active.name}.` : "Selecciona una marca."}/>}</Module>}
 
           {view === "plugins" && <Module title="Plugins IA" subtitle="Arquitectura lista para proveedores intercambiables y open-source."><div className="grid gap-3 md:grid-cols-2">{[["Texto","Copies, ideas, hooks y CTA."],["Visión","Analiza recursos e inspiraciones."],["Imagen","Generación visual desacoplada."],["Upscale / Fondo","Procesamiento final de piezas."]].map(([a,b])=><div key={a} className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5"><div className="text-sm font-semibold">{a}</div><div className="mt-2 text-xs text-white/40">{b}</div><div className="mt-4 text-[10px] text-white/30">Preparado para integración</div></div>)}</div></Module>}
         </section>
