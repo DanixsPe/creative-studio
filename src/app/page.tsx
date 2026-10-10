@@ -74,9 +74,48 @@ export default function HomePage() {
   const [generated, setGenerated] = useState<GeneratedItem[]>([]);
   const [uploadMode, setUploadMode] = useState<"resource" | "inspiration" | null>(null);
   const [booting, setBooting] = useState(true);
+  const [isOnline, setIsOnline] = useState(true);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [privacyAuthorized, setPrivacyAuthorized] = useState(false);
+  const [needsLegalAcceptance, setNeedsLegalAcceptance] = useState(false);
+  const [legalBusy, setLegalBusy] = useState(false);
+  const [legalError, setLegalError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
   const active = brands.find((brand) => brand.id === activeId) ?? null;
+
+  useEffect(() => {
+    let mounted = true;
+    const checkConnection = async () => {
+      if (!navigator.onLine) {
+        if (mounted) setIsOnline(false);
+        return;
+      }
+      try {
+        const response = await fetch("/api/health", {
+          method: "HEAD",
+          cache: "no-store",
+          signal: AbortSignal.timeout(5000)
+        });
+        if (mounted) setIsOnline(response.ok);
+      } catch {
+        if (mounted) setIsOnline(false);
+      }
+    };
+    const onOffline = () => setIsOnline(false);
+    const onOnline = () => { void checkConnection(); };
+    setIsOnline(navigator.onLine);
+    void checkConnection();
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
+    const interval = window.setInterval(() => { void checkConnection(); }, 30000);
+    return () => {
+      mounted = false;
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
+      window.clearInterval(interval);
+    };
+  }, []);
 
   async function loadBrands(userId?: string) {
     if (!supabase) return;
@@ -148,6 +187,13 @@ export default function HomePage() {
       const { data } = await supabase.auth.getUser();
       if (!data.user) { setBooting(false); return; }
       setUser({ id: data.user.id, email: data.user.email, name: (data.user.user_metadata?.full_name as string | undefined) ?? (data.user.user_metadata?.name as string | undefined) });
+      const { data: legalRows, error: legalLookupError } = await supabase
+        .from("legal_acceptances")
+        .select("id")
+        .eq("user_id", data.user.id)
+        .order("accepted_at", { ascending: false })
+        .limit(1);
+      setNeedsLegalAcceptance(Boolean(legalLookupError || !legalRows?.length));
       await loadBrands(data.user.id);
       await loadHistory();
       setBooting(false);
@@ -157,8 +203,10 @@ export default function HomePage() {
       // bootstrap() already handles the initial restored session.
       if (event === "INITIAL_SESSION") return;
       const u = session?.user;
-      if (!u) { setUser(null); setBrands([]); setActiveId(""); return; }
+      if (!u) { setUser(null); setBrands([]); setActiveId(""); setNeedsLegalAcceptance(false); return; }
       setUser({ id: u.id, email: u.email, name: (u.user_metadata?.full_name as string | undefined) ?? (u.user_metadata?.name as string | undefined) });
+      void supabase.from("legal_acceptances").select("id").eq("user_id", u.id).order("accepted_at", { ascending: false }).limit(1)
+        .then(({ data: rows, error }) => setNeedsLegalAcceptance(Boolean(error || !rows?.length)));
       void loadBrands(u.id);
       void loadHistory();
     });
@@ -169,11 +217,38 @@ export default function HomePage() {
 
   async function signIn() {
     if (!supabase) return setNotice("Faltan las variables de Supabase en Vercel.");
+    if (!termsAccepted) return setNotice("Debes aceptar los Términos y condiciones para continuar.");
+    if (!privacyAuthorized) return setNotice("Debes autorizar el tratamiento de tus datos personales para continuar.");
+    document.cookie = "creative_studio_legal_consent=2026-10-10-v1; Path=/; Max-Age=900; SameSite=Lax; Secure";
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo: `${window.location.origin}/auth/callback` }
     });
-    if (error) setNotice(error.message);
+    if (error) {
+      document.cookie = "creative_studio_legal_consent=; Path=/; Max-Age=0; SameSite=Lax; Secure";
+      setNotice(error.message);
+    }
+  }
+
+  async function saveLegalAcceptance() {
+    if (!supabase || !user) return setLegalError("No se pudo identificar tu sesión. Cierra sesión y vuelve a entrar.");
+    if (!termsAccepted) return setLegalError("Debes aceptar los Términos y condiciones.");
+    if (!privacyAuthorized) return setLegalError("Debes autorizar el tratamiento de datos personales.");
+    setLegalBusy(true);
+    setLegalError("");
+    const { error } = await supabase.from("legal_acceptances").insert({
+      user_id: user.id,
+      terms_version: "2026-10-10-v1",
+      privacy_version: "2026-10-10-v1",
+      data_processing_consent: true
+    });
+    setLegalBusy(false);
+    if (error) {
+      setLegalError(`No se pudo guardar la aceptación: ${error.message}`);
+      return;
+    }
+    setNeedsLegalAcceptance(false);
+    setNotice("Tu aceptación de los documentos y autorización de datos quedó registrada.");
   }
 
   async function signOut() {
@@ -483,8 +558,14 @@ export default function HomePage() {
       <div className="w-full max-w-md rounded-[28px] border border-white/[0.09] bg-[#0d0f13] p-8">
         <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-white font-black text-black">C</div>
         <div className="mt-6 text-center"><div className="text-xs uppercase tracking-[0.2em] text-violet-300/70">Creative Studio</div><h1 className="mt-3 text-3xl font-semibold">Tu espacio creativo para marcas</h1><p className="mt-3 text-sm leading-6 text-white/40">Guarda marcas, recursos, inspiraciones y generaciones en tu propia cuenta.</p></div>
-        <button onClick={signIn} className="mt-8 w-full rounded-2xl bg-white px-4 py-3.5 text-sm font-semibold text-black">Continuar con Google</button>
+        <div className="mt-6 space-y-3 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4 text-xs leading-5 text-white/65">
+          <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} className="mt-1 accent-violet-400"/><span>He leído y acepto los <a href="/legal#terminos" target="_blank" className="text-violet-200 underline underline-offset-2">Términos y condiciones</a>.</span></label>
+          <label className="flex cursor-pointer items-start gap-2.5"><input type="checkbox" checked={privacyAuthorized} onChange={(event) => setPrivacyAuthorized(event.target.checked)} className="mt-1 accent-violet-400"/><span>Autorizo de forma previa, expresa e informada el tratamiento de mis datos personales conforme a la <a href="/legal#privacidad" target="_blank" className="text-violet-200 underline underline-offset-2">Política de tratamiento de datos</a>, incluida la transmisión necesaria a proveedores descritos allí para generar contenidos con IA.</span></label>
+          <a href="/legal#cookies" target="_blank" className="inline-block text-white/40 underline underline-offset-2 hover:text-white/70">Política de cookies y sesión</a>
+        </div>
+        <button onClick={signIn} disabled={!termsAccepted || !privacyAuthorized} className="mt-5 w-full rounded-2xl bg-white px-4 py-3.5 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40">Continuar con Google</button>
         {notice && <div className="mt-4 rounded-xl bg-red-400/10 p-3 text-xs text-red-200">{notice}</div>}
+        <p className="mt-5 text-center text-[10px] leading-5 text-white/30">Los documentos legales están en fase de borrador y deben completarse antes del lanzamiento público.</p>
       </div>
     </main>
   );
@@ -497,6 +578,14 @@ export default function HomePage() {
           <button onClick={() => setBrandOpen(true)} className="mb-5 rounded-xl bg-white px-3 py-3 text-sm font-semibold text-black">+ Nueva marca</button>
           <nav className="space-y-1">{NAV.map(([id, label, icon]) => <button key={id} onClick={() => setView(id)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm ${view === id ? "bg-white/[0.08] text-white" : "text-white/55 hover:bg-white/[0.045] hover:text-white"}`}><span className="w-5 text-center">{icon}</span>{label}</button>)}</nav>
           <div className="mt-7 border-t border-white/[0.07] pt-5"><div className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/35">Mis marcas</div><div className="space-y-1.5">{brands.map((brand) => <button key={brand.id} onClick={() => { setActiveId(brand.id); setView("home"); }} className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left ${activeId === brand.id ? "bg-white/[0.06]" : "hover:bg-white/[0.035]"}`}><span className="grid h-9 w-9 place-items-center rounded-lg bg-white/[0.08] text-[10px] font-bold">{brand.name.slice(0,2).toUpperCase()}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{brand.name}</span><span className="block truncate text-[10px] text-white/35">{brand.description || "Sin descripción"}</span></span></button>)}</div></div>
+          <div className="mt-5 border-t border-white/[0.07] pt-4">
+            <div className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/30">Legal</div>
+            <div className="space-y-1">
+              <a href="/legal#terminos" className="block rounded-lg px-2 py-1.5 text-[11px] text-white/40 transition hover:bg-white/[0.04] hover:text-white/75">Términos y condiciones</a>
+              <a href="/legal#privacidad" className="block rounded-lg px-2 py-1.5 text-[11px] text-white/40 transition hover:bg-white/[0.04] hover:text-white/75">Privacidad y datos</a>
+              <a href="/legal#ia" className="block rounded-lg px-2 py-1.5 text-[11px] text-white/40 transition hover:bg-white/[0.04] hover:text-white/75">Uso de IA</a>
+            </div>
+          </div>
           <div className="mt-auto pt-7"><div className="rounded-xl border border-white/[0.07] bg-white/[0.025] p-2.5"><div className="truncate text-xs font-medium">{user.name || "Usuario"}</div><div className="truncate text-[10px] text-white/35">{user.email || "Cuenta Google"}</div><button onClick={signOut} className="mt-3 w-full rounded-lg border border-white/[0.07] px-3 py-2 text-[10px] text-white/45 hover:text-white">Cerrar sesión</button></div></div>
         </aside>
 
@@ -508,15 +597,26 @@ export default function HomePage() {
                 {active ? `Marca activa · ${active.name}` : "Sin marca activa"} · {user.email || "Cuenta Google"}
               </div>
             </div>
-            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/[0.05] px-3 py-1 text-[10px] text-emerald-300">
-              <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-emerald-300" />
-              Usuario en línea
+            <span
+              role="status"
+              aria-live="polite"
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] transition-colors ${isOnline ? "border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300" : "border-rose-400/25 bg-rose-400/[0.06] text-rose-200"}`}
+            >
+              <span className={`inline-block h-1.5 w-1.5 rounded-full ${isOnline ? "bg-emerald-300 shadow-[0_0_8px_rgba(110,231,183,0.8)]" : "bg-rose-300"}`} />
+              Usuario {isOnline ? "online" : "offline"}
             </span>
           </header>
           <input ref={fileRef} type="file" multiple className="hidden" accept="image/*,.pdf,.svg,.webp,.ai,.psd,.zip" onChange={uploadFiles} />
 
           {view === "home" && <div className="subtle-grid flex flex-1 overflow-y-auto px-8 py-10"><div className="mx-auto flex w-full max-w-5xl flex-col justify-center">{active ? <>
-            <div className="mb-8 text-center"><div className="mb-3 text-xs uppercase tracking-[0.22em] text-violet-300/70">{active.name}</div><h1 className="text-4xl font-semibold tracking-[-0.04em] md:text-5xl">¿Qué quieres crear?</h1><p className="mx-auto mt-3 max-w-xl text-sm text-white/40">Combina prompt, recursos, inspiración, formato y cantidad.</p></div>
+            <div className="mb-9 text-center">
+              <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-violet-300/20 bg-violet-300/[0.07] px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-violet-100/85 shadow-[0_0_38px_rgba(139,92,246,0.10)]">
+                <span className="h-1.5 w-1.5 rounded-full bg-violet-300" />
+                {active.name}
+              </div>
+              <h1 className="bg-gradient-to-r from-white via-white to-violet-100 bg-clip-text text-5xl font-semibold tracking-[-0.055em] text-transparent sm:text-6xl lg:text-7xl">¿Qué quieres crear?</h1>
+              <p className="mx-auto mt-4 max-w-xl text-sm leading-6 text-white/45">Combina prompt, recursos, inspiración, formato y cantidad.</p>
+            </div>
             <div className="mx-auto w-full max-w-3xl"><div className="rounded-[28px] border border-white/[0.11] bg-[#0d0f13] p-2 shadow-2xl"><textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} placeholder={`Ej.: crea ${count} posts para ${active.name} con estética premium…`} className="w-full resize-none bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-white/25" /><div className="flex flex-wrap items-center gap-2 px-1 pt-2">
               <div className="relative"><button onClick={() => setMenu(menu === "resources" ? null : "resources")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">+ Recursos e inspiración</button>{menu === "resources" && <div className="glass absolute left-0 top-full z-20 mt-2 w-72 rounded-2xl p-2"><button onClick={() => chooseUpload("resource")} className="w-full rounded-xl p-3 text-left hover:bg-white/[0.05]"><div className="text-xs font-medium">Recursos de marca</div><div className="mt-1 text-[11px] text-white/35">Logos, productos, fotos y archivos.</div></button><button onClick={() => chooseUpload("inspiration")} className="w-full rounded-xl p-3 text-left hover:bg-white/[0.05]"><div className="text-xs font-medium">Inspiración</div><div className="mt-1 text-[11px] text-white/35">Capturas, anuncios y referencias.</div></button></div>}</div>
               <div className="relative"><button onClick={() => setMenu(menu === "type" ? null : "type")} className="rounded-full border border-white/[0.08] bg-white/[0.035] px-4 py-2 text-xs text-white/70">Tipo · {labelFor(designType)} ▾</button>{menu === "type" && <div className="glass absolute left-0 top-full z-20 mt-2 w-48 rounded-2xl p-2">{TYPES.map(([id,label]) => <button key={id} onClick={() => { setDesignType(id); setMenu(null); }} className="block w-full rounded-xl px-3 py-2.5 text-left text-xs hover:bg-white/[0.05]">{label}</button>)}</div>}</div>
@@ -586,6 +686,23 @@ export default function HomePage() {
           {view === "plugins" && <Module title="Plugins IA" subtitle="Arquitectura lista para proveedores intercambiables y open-source."><div className="grid gap-3 md:grid-cols-2">{[["Texto","Copies, ideas, hooks y CTA."],["Visión","Analiza recursos e inspiraciones."],["Imagen","Generación visual desacoplada."],["Upscale / Fondo","Procesamiento final de piezas."]].map(([a,b])=><div key={a} className="rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-5"><div className="text-sm font-semibold">{a}</div><div className="mt-2 text-xs text-white/40">{b}</div><div className="mt-4 text-[10px] text-white/30">Preparado para integración</div></div>)}</div></Module>}
         </section>
       </div>
+
+      {needsLegalAcceptance && user && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="legal-acceptance-title">
+          <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-[#0d0f13] p-6 shadow-2xl sm:p-8">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-violet-200/70">Antes de continuar</div>
+            <h2 id="legal-acceptance-title" className="mt-3 text-2xl font-semibold tracking-tight">Revisa los documentos de Creative Studio</h2>
+            <p className="mt-3 text-sm leading-6 text-white/55">Estamos registrando tu aceptación de los términos y tu autorización de tratamiento de datos. Puedes abrir los documentos completos antes de aceptar.</p>
+            <div className="mt-5 space-y-4 rounded-2xl border border-white/[0.07] bg-white/[0.025] p-4 text-xs leading-5 text-white/65">
+              <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={termsAccepted} onChange={(event) => setTermsAccepted(event.target.checked)} className="mt-1 accent-violet-400"/><span>He leído y acepto los <a href="/legal#terminos" target="_blank" className="text-violet-200 underline underline-offset-2">Términos y condiciones</a>.</span></label>
+              <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={privacyAuthorized} onChange={(event) => setPrivacyAuthorized(event.target.checked)} className="mt-1 accent-violet-400"/><span>Autorizo de forma previa, expresa e informada el tratamiento de mis datos personales según la <a href="/legal#privacidad" target="_blank" className="text-violet-200 underline underline-offset-2">Política de tratamiento</a>, incluido el procesamiento necesario por proveedores tecnológicos para generar contenidos.</span></label>
+            </div>
+            {legalError && <div className="mt-4 rounded-xl border border-rose-300/15 bg-rose-300/[0.05] p-3 text-xs text-rose-100">{legalError}</div>}
+            <button onClick={() => void saveLegalAcceptance()} disabled={!termsAccepted || !privacyAuthorized || legalBusy} className="mt-5 w-full rounded-xl bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-40">{legalBusy ? "Guardando aceptación…" : "Aceptar y continuar"}</button>
+            <p className="mt-3 text-center text-[10px] leading-5 text-white/30">La documentación todavía es un borrador. El responsable debe completar sus datos legales antes del lanzamiento público.</p>
+          </div>
+        </div>
+      )}
 
       {brandOpen && <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"><div className="glass w-full max-w-md rounded-3xl p-5"><div className="text-lg font-semibold">Crear nueva marca</div><input autoFocus value={brandName} onChange={(e)=>setBrandName(e.target.value)} placeholder="Nombre de la marca" className="mt-5 w-full rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm outline-none"/><textarea value={brandDescription} onChange={(e)=>setBrandDescription(e.target.value)} rows={3} placeholder="Descripción (opcional)" className="mt-3 w-full resize-none rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm outline-none"/><div className="mt-5 flex justify-end gap-2"><button onClick={()=>setBrandOpen(false)} className="rounded-xl px-4 py-2.5 text-xs text-white/55">Cancelar</button><button onClick={()=>void createBrand()} disabled={busy} className="rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">{busy?"Creando…":"Crear marca"}</button></div></div></div>}
     </main>
