@@ -39,7 +39,7 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
   try {
     return JSON.parse(raw) as T;
   } catch {
-    const preview = raw.replace(/\\s+/g, " ").trim().slice(0, 180);
+    const preview = raw.replace(/\s+/g, " ").trim().slice(0, 180);
     throw new Error(
       `El servidor respondió con HTTP ${response.status}, pero no devolvió JSON válido.${preview ? ` Respuesta: ${preview}` : ""}`
     );
@@ -69,6 +69,8 @@ export default function HomePage() {
   const [brandDescription, setBrandDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [styleProfile, setStyleProfile] = useState("");
+  const [styleSourceCount, setStyleSourceCount] = useState(0);
   const [generated, setGenerated] = useState<GeneratedItem[]>([]);
   const [uploadMode, setUploadMode] = useState<"resource" | "inspiration" | null>(null);
   const [booting, setBooting] = useState(true);
@@ -115,10 +117,14 @@ export default function HomePage() {
 
   async function loadBrandData(brandId: string) {
     if (!supabase || !brandId) return;
-    const [a, i] = await Promise.all([
+    const [a, i, profile] = await Promise.all([
       supabase.from("brand_assets").select("id,name,type,url,created_at").eq("brand_id", brandId).order("created_at", { ascending: false }),
-      supabase.from("inspirations").select("id,title,url,created_at").eq("brand_id", brandId).order("created_at", { ascending: false })
+      supabase.from("inspirations").select("id,title,url,created_at").eq("brand_id", brandId).order("created_at", { ascending: false }),
+      supabase.from("brand_style_profiles").select("style_profile,source_count").eq("brand_id", brandId).maybeSingle()
     ]);
+    setStyleProfile(profile.data?.style_profile ?? "");
+    setStyleSourceCount(profile.data?.source_count ?? 0);
+    if (profile.error) setNotice(profile.error.message);
     const nextAssets = await Promise.all(((a.data ?? []) as Asset[]).map(async (x) => ({ ...x, signedUrl: await signedUrl(x.url) })));
     const nextInspirations = await Promise.all(((i.data ?? []) as Inspiration[]).map(async (x) => ({ ...x, signedUrl: await signedUrl(x.url) })));
     setAssets(nextAssets);
@@ -195,6 +201,35 @@ export default function HomePage() {
     }
     setBrands((current) => [...current, data as Brand]);
     setActiveId(data.id); setBrandName(""); setBrandDescription(""); setBrandOpen(false); setView("home");
+  }
+
+  async function analyzeInspirations() {
+    if (!supabase || !user || !active) return setNotice("Selecciona una marca primero.");
+    if (!inspirations.length) return setNotice("Sube primero imágenes en Inspiración para esta marca.");
+    setBusy(true);
+    setNotice(`Analizando ${inspirations.length} referencias de ${active.name}…`);
+    try {
+      const response = await fetch("/api/analyze-inspiration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brandId: active.id })
+      });
+      const payload = await readJsonResponse<{
+        styleProfile?: string;
+        sourceCount?: number;
+        error?: string;
+      }>(response);
+      if (!response.ok || !payload.styleProfile) {
+        throw new Error(payload.error || `No se pudo analizar la inspiración (HTTP ${response.status}).`);
+      }
+      setStyleProfile(payload.styleProfile);
+      setStyleSourceCount(payload.sourceCount ?? inspirations.length);
+      setNotice(`Estilo visual guardado para ${active.name} usando ${payload.sourceCount ?? inspirations.length} referencias. Este perfil se aplicará a sus próximas imágenes.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "No se pudo analizar la inspiración.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function generate() {
@@ -543,7 +578,7 @@ export default function HomePage() {
 
           {view === "library" && <Module title="Biblioteca" subtitle={active ? `Recursos guardados para ${active.name}.` : "Selecciona una marca."}>{active && <button onClick={()=>chooseUpload("resource")} className="mb-6 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">Subir recursos</button>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">{assets.map((x)=><div key={x.id} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]"><div className="aspect-square bg-black/30">{x.signedUrl && x.type==="image" ? <img src={x.signedUrl} alt={x.name} className="h-full w-full object-cover"/> : <div className="grid h-full place-items-center text-xs text-white/30">{x.type.toUpperCase()}</div>}</div><div className="p-3"><div className="truncate text-xs">{x.name}</div><button onClick={()=>void removeAsset(x)} className="mt-2 text-[10px] text-red-300/70">Eliminar</button></div></div>)}</div>{!assets.length&&<Empty text="Todavía no hay recursos para esta marca."/>}</Module>}
 
-          {view === "inspiration" && <Module title="Inspiración" subtitle="Referencias visuales separadas por marca.">{active && <button onClick={()=>chooseUpload("inspiration")} className="mb-6 rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">Añadir inspiración</button>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">{inspirations.map((x)=><div key={x.id} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]"><div className="aspect-square bg-black/30">{x.signedUrl ? <img src={x.signedUrl} alt={x.title||"Inspiración"} className="h-full w-full object-cover"/> : <div className="grid h-full place-items-center text-xs text-white/30">Sin vista previa</div>}</div><div className="p-3"><div className="truncate text-xs">{x.title||"Referencia"}</div><button onClick={()=>void removeInspiration(x)} className="mt-2 text-[10px] text-red-300/70">Eliminar</button></div></div>)}</div>{!inspirations.length&&<Empty text="Todavía no hay referencias."/>}</Module>}
+          {view === "inspiration" && <Module title="Inspiración" subtitle={active ? `Referencias visuales y manual de estilo de ${active.name}.` : "Selecciona una marca."}>{active && <div className="mb-6 flex flex-wrap items-center gap-3"><button onClick={()=>chooseUpload("inspiration")} className="rounded-xl bg-white px-4 py-2.5 text-xs font-semibold text-black">Añadir inspiración</button><button onClick={()=>void analyzeInspirations()} disabled={busy || inspirations.length === 0} className="rounded-xl border border-violet-300/25 bg-violet-300/10 px-4 py-2.5 text-xs font-semibold text-violet-100 disabled:opacity-40">{busy ? "Analizando…" : styleProfile ? "Actualizar estilo de marca" : "Analizar referencias y guardar estilo"}</button></div>}{styleProfile && <div className="mb-6 rounded-2xl border border-violet-300/15 bg-violet-300/[0.04] p-4"><div className="flex items-center justify-between gap-3"><div className="text-xs font-semibold text-violet-100">Manual visual de {active?.name}</div><div className="text-[10px] text-white/35">{styleSourceCount} referencias analizadas</div></div><p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-white/60">{styleProfile}</p><p className="mt-3 text-[10px] text-white/30">Es memoria visual de esta marca, no un reentrenamiento de los pesos del modelo.</p></div>}<div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">{inspirations.map((x)=><div key={x.id} className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0d0f13]"><div className="aspect-square bg-black/30">{x.signedUrl ? <img src={x.signedUrl} alt={x.title||"Inspiración"} className="h-full w-full object-cover"/> : <div className="grid h-full place-items-center text-xs text-white/30">Sin vista previa</div>}</div><div className="p-3"><div className="truncate text-xs">{x.title||"Referencia"}</div><button onClick={()=>void removeInspiration(x)} className="mt-2 text-[10px] text-red-300/70">Eliminar</button></div></div>)}</div>{!inspirations.length&&<Empty text="Todavía no hay referencias."/>}</Module>}
 
           {view === "history" && <Module title="Historial" subtitle={active ? `Generaciones de ${active.name}; cambia de marca en la barra lateral para ver otro historial.` : "Selecciona una marca para ver su historial."}><div className="space-y-2">{history.filter((x) => x.brand_id === activeId).map((x)=><div key={x.id} className="flex items-center gap-4 rounded-2xl border border-white/[0.07] bg-[#0d0f13] p-4"><div className="grid h-11 w-11 place-items-center rounded-xl bg-white/[0.06] text-xs font-semibold">{x.quantity}</div><div className="min-w-0 flex-1"><div className="truncate text-sm">{x.prompt || labelFor(x.design_type)}</div><div className="mt-1 text-[11px] text-white/35">{brands.find((b)=>b.id===x.brand_id)?.name || "Marca"} · {labelFor(x.design_type)} · {new Date(x.created_at).toLocaleString("es-CO")}</div></div><span className="text-[10px] text-white/35">{x.status}</span></div>)}</div>{!history.some((x) => x.brand_id === activeId)&&<Empty text={active ? `Aún no hay generaciones para ${active.name}.` : "Selecciona una marca."}/>}</Module>}
 
