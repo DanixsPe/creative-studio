@@ -20,6 +20,7 @@ type RequestBody = {
 };
 
 const MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
+export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
@@ -83,12 +84,15 @@ export async function POST(request: Request) {
   }
 
   // Each image only uses files belonging to the active brand and authenticated user.
-  const referencePaths = [
-    ...(body.resourcePaths ?? []),
-    ...(body.inspirationPaths ?? [])
-  ]
+  // Keep brand inspirations first (style), then attach at most one product image
+  // for this individual post. FLUX.2 Klein supports up to four reference images.
+  const inspirationPaths = (body.inspirationPaths ?? [])
     .filter((path) => typeof path === "string" && path.length > 0)
-    .slice(0, 8);
+    .slice(0, 3);
+  const resourcePaths = (body.resourcePaths ?? [])
+    .filter((path) => typeof path === "string" && path.length > 0)
+    .slice(0, 1);
+  const referencePaths = [...inspirationPaths, ...resourcePaths];
 
   const form = new FormData();
   const promptText = `Create a finished, professional advertising poster for the brand "${body.brandName}".
@@ -101,12 +105,16 @@ Art direction: ${body.visualDirection}
 Visual prompt: ${body.imagePrompt}
 Format: vertical 4:5 social media advertisement.
 
+REFERENCE ORDER:
+- Reference images are supplied with brand inspirations first, then the product image for this specific post (if available).
+- Use the inspiration images to reproduce the brand's preferred art direction, palette, composition, lighting, texture, and visual language. Do not copy their exact layout blindly.
+- If a product/reference photo is supplied last, use that specific product as the main subject and preserve its shape, proportions, color, dial/details, logo placement, materials, and silhouette. Do not invent a different product.
+
 ART DIRECTION REQUIREMENTS:
 - Output a finished advertisement ready to publish, not a moodboard, wireframe, or draft.
-- High-end advertising-agency composition, professional lighting, hierarchy, typography, spacing, and material detail.
-- Use supplied reference images as product/brand/style guidance. The first references are brand resources; later references are inspiration examples.
-- Preserve the physical appearance, color, product details, logo, and identity shown in the references. Do not combine different brands.
-- Include the headline and CTA legibly when appropriate. Keep text concise and correctly spelled.
+- High-end advertising-agency composition, professional lighting, clear hierarchy, balanced spacing, convincing materials, and coherent typography.
+- Keep the product fully visible and anatomically/physically plausible; avoid cropped-off watches, duplicated parts, melted details, blur, broken hands, distorted crowns or straps.
+- Include the headline and CTA as short, correctly spelled typography when appropriate. Prefer limited text to reduce letter errors; never invent extra claims.
 - Do not invent prices, discounts, phone numbers, URLs, features, or promotions.
 - No watermark, extra logos, fake interface elements, or generic template look.
 - Make this look like a designed advertising poster rather than an unformatted AI illustration.`;
